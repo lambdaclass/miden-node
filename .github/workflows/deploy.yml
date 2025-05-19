@@ -47,7 +47,6 @@ jobs:
 
       # Download from github if its a version tag referece.
       - name: Download from releases
-        if: ${{ startsWith(inputs.gitref, 'v') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           node-artifact:   miden-node-${{ inputs.gitref }}-arm64.deb
@@ -63,23 +62,6 @@ jobs:
 
           mv ${{ env.node-artifact }} ${{ env.node-package }}
           mv ${{ env.faucet-artifact }} ${{ env.faucet-package }}
-
-      # Otherwise build the packages from source.
-      #
-      # Note that we cannot build from the currently checked out repo source since that source
-      # defines our workflow actions, and not the compilation source target. For this reason we
-      # prefer building the binary using `cargo install ...`.
-      - name: Build from source
-        if: ${{ !startsWith(inputs.gitref, 'v') }}
-        uses: ./.github/actions/build_package
-        with: 
-          gitref: ${{ inputs.gitref }}
-
-      - name: Rename built packages
-        if: ${{ !startsWith(inputs.gitref, 'v') }}
-        run: |
-          mv miden-node.deb   ${{ env.node-package }} 
-          mv miden-faucet.deb ${{ env.faucet-package }} 
 
       - name: Write SSH key
         run: |
