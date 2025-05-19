@@ -53,33 +53,12 @@ jobs:
           node-artifact:   miden-node-${{ inputs.gitref }}-arm64.deb
           faucet-artifact: miden-faucet-${{ inputs.gitref }}-arm64.deb
         run: |
-          gh release download ${{ inputs.gitref }} -p ${{ env.node-artifact }}
-          gh release download ${{ inputs.gitref }} -p ${{ env.node-artifact }}.checksum
-          gh release download ${{ inputs.gitref }} -p ${{ env.faucet-artifact }}
-          gh release download ${{ inputs.gitref }} -p ${{ env.faucet-artifact }}.checksum
+          echo "${{ env.ssh_key }}" > key.pem
+          chmod 600 key.pem
 
-          sha256sum --check ${{ env.node-artifact }}.checksum
-          sha256sum --check ${{ env.faucet-artifact }}.checksum
-
-          mv ${{ env.node-artifact }} ${{ env.node-package }}
-          mv ${{ env.faucet-artifact }} ${{ env.faucet-package }}
-
-      # Otherwise build the packages from source.
-      #
-      # Note that we cannot build from the currently checked out repo source since that source
-      # defines our workflow actions, and not the compilation source target. For this reason we
-      # prefer building the binary using `cargo install ...`.
-      - name: Build from source
-        if: ${{ !startsWith(inputs.gitref, 'v') }}
-        uses: ./.github/actions/build_package
-        with: 
-          gitref: ${{ inputs.gitref }}
-
-      - name: Rename built packages
-        if: ${{ !startsWith(inputs.gitref, 'v') }}
+      - name: Upload packages via scp
         run: |
-          mv miden-node.deb   ${{ env.node-package }} 
-          mv miden-faucet.deb ${{ env.faucet-package }} 
+          scp -i key.pem -o StrictHostKeyChecking=no ${{ env.node-package }} ${{ env.faucet-package }} ${{ env.ssh_user }}@${{ env.server_ip }}:/tmp/
 
       - name: Write SSH key
         run: |
