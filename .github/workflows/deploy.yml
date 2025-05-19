@@ -32,8 +32,8 @@ jobs:
       labels: ubuntu-latest
 
     env:
-      node-package: node-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
-      faucet-package: faucet-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
+      node-package: node-${{ github.run_id }}-${{ github.run_number }}.amd64.deb
+      faucet-package: faucet-${{ github.run_id }}-${{ github.run_number }}.amd64.deb
       server_ip: ${{ secrets.SERVER_IP }}
       ssh_key: ${{ secrets.SSH_PRIVATE_KEY }}
       ssh_user: admin
