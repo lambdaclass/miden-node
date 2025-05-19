@@ -32,8 +32,8 @@ jobs:
       labels: ubuntu-latest
 
     env:
-      node-package: miden-node-0.8-amd64.deb
-      faucet-package: faucet-0.8-amd64.deb.deb
+      node-package: node-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
+      faucet-package: faucet-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
       server_ip: ${{ secrets.SERVER_IP }}
       ssh_key: ${{ secrets.SSH_PRIVATE_KEY }}
       ssh_user: ubuntu  # or another user with access
