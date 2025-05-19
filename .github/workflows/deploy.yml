@@ -29,7 +29,7 @@ jobs:
   deploy:
     name: ${{ inputs.network }} - ${{ inputs.gitref }}
     runs-on:
-      labels: ubuntu22-arm-4core
+      labels: ubuntu-latest
 
     env:
       node-package: node-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
