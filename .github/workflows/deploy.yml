@@ -36,7 +36,7 @@ jobs:
       faucet-package: faucet-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
       server_ip: ${{ secrets.SERVER_IP }}
       ssh_key: ${{ secrets.SSH_PRIVATE_KEY }}
-      ssh_user: ubuntu  # or another user with access
+      ssh_user: admin
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -49,8 +49,8 @@ jobs:
       - name: Download from releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          node-artifact:   miden-node-${{ inputs.gitref }}-arm64.deb
-          faucet-artifact: miden-faucet-${{ inputs.gitref }}-arm64.deb
+          node-artifact:   miden-node-${{ inputs.gitref }}-amd64.deb
+          faucet-artifact: miden-faucet-${{ inputs.gitref }}-amd64.deb
         run: |
           gh release download ${{ inputs.gitref }} -p ${{ env.node-artifact }}
           gh release download ${{ inputs.gitref }} -p ${{ env.node-artifact }}.checksum
