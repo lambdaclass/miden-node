@@ -23,4 +23,4 @@ else
     sudo chown -R miden-node /etc/opt/miden-node
 fi
 
-sudo systemctl daemon-reload
+# sudo systemctl daemon-reload

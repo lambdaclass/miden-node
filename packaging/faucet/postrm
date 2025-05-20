@@ -5,4 +5,4 @@
 ##############
 sudo rm -rf /lib/systemd/system/miden-faucet.service
 sudo deluser miden-faucet
-sudo systemctl daemon-reload
+# sudo systemctl daemon-reload

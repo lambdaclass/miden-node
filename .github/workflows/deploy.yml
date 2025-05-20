@@ -32,8 +32,8 @@ jobs:
       labels: ubuntu-latest
 
     env:
-      node-package: node-${{ github.run_id }}-${{ github.run_number }}.amd64.deb
-      faucet-package: faucet-${{ github.run_id }}-${{ github.run_number }}.amd64.deb
+      node-package: node-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
+      faucet-package: faucet-${{ github.run_id }}-${{ github.run_number }}.arm64.deb
       server_ip: ${{ secrets.SERVER_IP }}
       ssh_key: ${{ secrets.SSH_PRIVATE_KEY }}
       ssh_user: admin
@@ -49,8 +49,8 @@ jobs:
       - name: Download from releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          node-artifact:   miden-node-${{ inputs.gitref }}-amd64.deb
-          faucet-artifact: miden-faucet-${{ inputs.gitref }}-amd64.deb
+          node-artifact:   miden-node-${{ inputs.gitref }}-arm64.deb
+          faucet-artifact: miden-faucet-${{ inputs.gitref }}-arm64.deb
         run: |
           gh release download ${{ inputs.gitref }} -p ${{ env.node-artifact }}
           gh release download ${{ inputs.gitref }} -p ${{ env.node-artifact }}.checksum
@@ -81,7 +81,7 @@ jobs:
             sudo dpkg -i /tmp/${{ env.node-package }}
             sudo dpkg -i /tmp/${{ env.faucet-package }}
             if [ ! -f /opt/miden-node/miden-store.sqlite3 ]; then
-              sudo /usr/bin/miden-node bundled bootstrap --data-directory /opt/miden-node --accounts-directory /opt/miden-faucet --faucet-account-path /opt/miden-faucet/account.mac
+              sudo /usr/bin/miden-node bundled bootstrap --data-directory /opt/miden-node --accounts-directory /opt/miden-faucet
             fi
             sudo /usr/bin/miden-faucet init -c /etc/opt/miden-faucet/miden-faucet.toml -f /opt/miden-faucet/account.mac
             sudo chown -R miden-node /opt/miden-node
