@@ -10,8 +10,8 @@ sudo dpkg -i miden-node.deb
 sudo dpkg -i miden-faucet.deb
 if [ ! -f /opt/miden-node/miden-store.sqlite3 ]; then \
     sudo /usr/bin/miden-node bundled bootstrap --data-directory /opt/miden-node --accounts-directory /opt/miden-faucet; \
-    sudo /usr/bin/miden-faucet init -c /etc/opt/miden-faucet/miden-faucet.toml -f /opt/miden-faucet/account.mac; \
 fi
+sudo /usr/bin/miden-faucet init -c /etc/opt/miden-faucet/miden-faucet.toml -f /opt/miden-faucet/account.mac; \
 sudo chown -R miden-node /opt/miden-node
 sudo chown -R miden-faucet /opt/miden-faucet
 
@@ -24,5 +24,5 @@ sudo dpkg -i miden-node.deb
 sudo dpkg -i miden-faucet.deb
 if [ ! -f /opt/miden-node/miden-store.sqlite3 ]; then \
     sudo /usr/bin/miden-node bundled bootstrap --data-directory /opt/miden-node --accounts-directory /opt/miden-faucet; \
-    sudo /usr/bin/miden-faucet init -c /etc/opt/miden-faucet/miden-faucet.toml -f /opt/miden-faucet/account.mac; \
 fi
+sudo /usr/bin/miden-faucet init -c /etc/opt/miden-faucet/miden-faucet.toml -f /opt/miden-faucet/account.mac; \

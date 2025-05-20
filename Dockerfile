@@ -67,16 +67,4 @@ RUN dpkg-deb --build --root-owner-group packaging/deb/miden-node && \
 
 # DEPLOY
 
-# sudo systemctl stop miden-node || true
-# sudo systemctl stop miden-faucet || true
-# RUN sudo apt remove miden-node miden-faucet -y || true
-# RUN sudo dpkg -i miden-node.deb
-# RUN sudo dpkg -i miden-faucet.deb
-# RUN if [ ! -f /opt/miden-node/miden-store.sqlite3 ]; then \
-#         sudo /usr/bin/miden-node bundled bootstrap --data-directory /opt/miden-node --accounts-directory /opt/miden-faucet; \
-#         sudo /usr/bin/miden-faucet init -c /etc/opt/miden-faucet/miden-faucet.toml -f /opt/miden-faucet/account.mac; \
-#     fi
-# RUN sudo chown -R miden-node /opt/miden-node
-# RUN sudo chown -R miden-faucet /opt/miden-faucet
-
 CMD ["miden-node"]
