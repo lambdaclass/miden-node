@@ -16,6 +16,11 @@ on:
         required: true
         type: string
 
+      reset-db:
+        description: 'Delete the database and create a new one'
+        required: false
+        type: boolean
+  
 # Limit concurrency to 1 per network.
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.network }}
@@ -40,6 +45,16 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
+      - name: test reset-db
+        run: |
+          echo "reset-db: ${{ inputs.reset-db }}"
+          if [ "${{ inputs.reset-db }}" == "true" ]; then
+            echo "Resetting the database 1 "
+          fi
+          if [ ${{ inputs.reset-db }} == "true" ]; then
+            echo "Resetting the database 2"
+          fi
+
       - name: Checkout repo
         uses: actions/checkout@v3
         with:
