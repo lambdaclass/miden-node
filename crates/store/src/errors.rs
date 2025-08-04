@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::oneshot::error::RecvError;
 use tonic::Status;
 
-use crate::db::manager::ConnectionManagerError;
+use crate::db::{manager::ConnectionManagerError, models::conv::DatabaseTypeConversionError};
 
 // DATABASE ERRORS
 // =================================================================================================
@@ -94,6 +94,8 @@ pub enum DatabaseError {
     UnsupportedDatabaseVersion,
     #[error(transparent)]
     ConnectionManager(#[from] ConnectionManagerError),
+    #[error(transparent)]
+    SqlValueConversion(#[from] DatabaseTypeConversionError),
 }
 
 impl DatabaseError {
