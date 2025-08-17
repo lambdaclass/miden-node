@@ -55,16 +55,6 @@ impl RpcCommand {
             grpc_timeout,
         } = self;
 
-        let store = store_url
-            .to_socket()
-            .context("Failed to extract socket address from store URL")?;
-
-        let block_producer = if let Some(url) = block_producer_url {
-            Some(url.to_socket().context("Failed to extract socket address from store URL")?)
-        } else {
-            None
-        };
-
         let listener = url.to_socket().context("Failed to extract socket address from RPC URL")?;
         let listener = tokio::net::TcpListener::bind(listener)
             .await
@@ -72,8 +62,8 @@ impl RpcCommand {
 
         Rpc {
             listener,
-            store,
-            block_producer,
+            store_url,
+            block_producer_url,
             grpc_timeout,
         }
         .serve()

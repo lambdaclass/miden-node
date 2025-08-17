@@ -60,10 +60,6 @@ impl BlockProducerCommand {
             grpc_timeout,
         } = self;
 
-        let store_address = store_url
-            .to_socket()
-            .context("Failed to extract socket address from store URL")?;
-
         let block_producer_address =
             url.to_socket().context("Failed to extract socket address from store URL")?;
 
@@ -83,7 +79,7 @@ impl BlockProducerCommand {
 
         BlockProducer {
             block_producer_address,
-            store_address,
+            store_url,
             batch_prover_url: block_producer.batch_prover_url,
             block_prover_url: block_producer.block_prover_url,
             batch_interval: block_producer.batch_interval,
