@@ -1,4 +1,4 @@
-name: Publish Node and Faucet Docker Images
+name: Publish Node Docker Image
 
 on:
   release:
