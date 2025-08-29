@@ -18,6 +18,7 @@ use tracing::{info, info_span, instrument};
 use crate::COMPONENT;
 use crate::db::manager::{ConnectionManager, configure_connection_on_creation};
 use crate::db::migrations::apply_migrations;
+use crate::db::models::queries::StorageMapValuesPage;
 use crate::db::models::{Page, queries};
 use crate::errors::{DatabaseError, DatabaseSetupError, NoteSyncError, StateSyncError};
 use crate::genesis::GenesisBlock;
@@ -434,6 +435,24 @@ impl Db {
             acquire_done.blocking_recv()?;
 
             Ok(())
+        })
+        .await
+    }
+
+    /// Selects storage map values for syncing storage maps for a specific account ID.
+    ///
+    /// The returned values are the latest known values up to `block_to`, and no values earlier
+    /// than `block_from` are returned.
+    pub(crate) async fn select_storage_map_sync_values(
+        &self,
+        account_id: AccountId,
+        block_from: BlockNumber,
+        block_to: BlockNumber,
+    ) -> Result<StorageMapValuesPage> {
+        self.transact("select storage map sync values", move |conn| {
+            models::queries::select_account_storage_map_values(
+                conn, account_id, block_from, block_to,
+            )
         })
         .await
     }

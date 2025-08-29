@@ -90,6 +90,8 @@ CREATE TABLE account_storage_map_values (
     CONSTRAINT slot_is_u8 CHECK (slot BETWEEN 0 AND 0xFF)
 ) WITHOUT ROWID;
 
+CREATE INDEX asm_latest_by_acct_block_slot_key ON account_storage_map_values(account_id, block_num);
+
 CREATE TABLE nullifiers (
     nullifier        BLOB    NOT NULL,
     nullifier_prefix INTEGER NOT NULL,

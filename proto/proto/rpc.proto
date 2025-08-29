@@ -86,6 +86,9 @@ service Api {
     // part of hashes. Thus, returned data contains excessive notes, client can make
     // additional filtering of that data on its side.
     rpc SyncState(rpc_store.SyncStateRequest) returns (rpc_store.SyncStateResponse) {}
+
+    // Returns storage map updates for specified account and storage slots within a block range.
+    rpc SyncStorageMaps(rpc_store.SyncStorageMapsRequest) returns (rpc_store.SyncStorageMapsResponse) {}
 }
 
 // RPC STATUS

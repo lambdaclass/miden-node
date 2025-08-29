@@ -2,6 +2,7 @@ use diesel::prelude::{Queryable, QueryableByName};
 use diesel::query_dsl::methods::SelectDsl;
 use diesel::sqlite::Sqlite;
 use diesel::{
+    BoolExpressionMethods,
     ExpressionMethods,
     JoinOnDsl,
     NullableExpressionMethods,
@@ -21,7 +22,7 @@ use miden_objects::asset::AssetVault;
 use miden_objects::block::BlockNumber;
 use miden_objects::{Felt, Word};
 
-use crate::db::models::conv::{SqlTypeConvert, raw_sql_to_nonce};
+use crate::db::models::conv::{SqlTypeConvert, raw_sql_to_nonce, raw_sql_to_slot};
 use crate::db::models::{serialize_vec, vec_raw_try_into};
 use crate::db::schema;
 use crate::errors::DatabaseError;
@@ -217,6 +218,119 @@ pub(crate) fn select_all_accounts(
         accounts_raw.into_iter().map(AccountWithCodeRaw::from),
     )?;
     Ok(account_infos)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageMapValue {
+    pub block_num: BlockNumber,
+    pub slot_index: u8,
+    pub key: Word,
+    pub value: Word,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageMapValuesPage {
+    /// Highest block number included in `rows`. If the page is empty, this will be `block_from`.
+    pub last_block_included: BlockNumber,
+    /// Storage map values
+    pub values: Vec<StorageMapValue>,
+}
+
+impl StorageMapValue {
+    pub fn from_raw_row(row: (i64, i32, Vec<u8>, Vec<u8>)) -> Result<Self, DatabaseError> {
+        let (block_num, slot_index, key, value) = row;
+        Ok(Self {
+            block_num: BlockNumber::from_raw_sql(block_num)?,
+            slot_index: raw_sql_to_slot(slot_index),
+            key: Word::read_from_bytes(&key)?,
+            value: Word::read_from_bytes(&value)?,
+        })
+    }
+}
+
+/// Select account storage map values from the DB using the given [`SqliteConnection`].
+///
+/// # Returns
+///
+/// A vector of tuples containing `(slot, key, value, is_latest_update)` for the given account.
+/// Each row contains one of:
+///
+/// - the historical value for a slot and key specifically on block `block_to`
+/// - the latest updated value for the slot and key combination, alongside the block number in which
+///   it was updated
+pub(crate) fn select_account_storage_map_values(
+    conn: &mut SqliteConnection,
+    account_id: AccountId,
+    block_from: BlockNumber,
+    block_to: BlockNumber,
+) -> Result<StorageMapValuesPage, DatabaseError> {
+    use schema::account_storage_map_values as t;
+
+    // SELECT
+    //     block_num,
+    //     slot,
+    //     key,
+    //     value
+    // FROM
+    //     account_storage_map_values
+    // WHERE
+    //     account_id = ?1
+    //     AND block_num >= ?2
+    //     AND block_num <= ?3
+    // ORDER BY
+    //     block_num ASC
+    // LIMIT
+    //     :row_limit;
+
+    // TODO: These limits should be given by the protocol.
+    // See miden-base/issues/1770 for more details
+    pub const MAX_PAYLOAD_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+    pub const ROW_OVERHEAD_BYTES: usize = size_of::<Word>() + size_of::<Word>() + size_of::<u8>(); // key + value + slot_idx
+    pub const ROW_LIMIT: usize = (MAX_PAYLOAD_BYTES / ROW_OVERHEAD_BYTES) + 1;
+
+    if !account_id.is_public() {
+        return Err(DatabaseError::AccountNotPublic(account_id));
+    }
+
+    if block_from > block_to {
+        return Err(DatabaseError::InvalidBlockRange { from: block_from, to: block_to });
+    }
+
+    let raw: Vec<(i64, i32, Vec<u8>, Vec<u8>)> =
+        SelectDsl::select(t::table, (t::block_num, t::slot, t::key, t::value))
+            .filter(
+                t::account_id
+                    .eq(account_id.to_bytes())
+                    .and(t::block_num.ge(block_from.to_raw_sql()))
+                    .and(t::block_num.le(block_to.to_raw_sql())),
+            )
+            .order(t::block_num.asc())
+            .limit(i64::try_from(ROW_LIMIT).expect("limit fits within i64"))
+            .load(conn)?;
+
+    // Discard the last block in the response (assumes more than one block may be present)
+    let (last_block_included, values) = if raw.len() >= ROW_LIMIT {
+        // NOTE: If the query contains at least one more row than the amount of storage map updates
+        // allowed in a single block for an account, then the response is guaranteed to have at
+        // least two blocks
+
+        // SAFETY: we checked that the vector is not empty
+        let &(last_block_num, ..) = raw.last().unwrap();
+        let values = raw
+            .into_iter()
+            .take_while(|(bn, ..)| *bn != last_block_num)
+            .map(StorageMapValue::from_raw_row)
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        (BlockNumber::from_raw_sql(last_block_num.saturating_sub(1))?, values)
+    } else {
+        (
+            block_to,
+            raw.into_iter().map(StorageMapValue::from_raw_row).collect::<Result<_, _>>()?,
+        )
+    };
+
+    Ok(StorageMapValuesPage { last_block_included, values })
 }
 
 #[derive(Debug, Clone, Queryable, QueryableByName, Selectable)]
