@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap 4.5.46",
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-block-producer"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-ntx-builder"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-proto"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-proto-build"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "prost",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-rpc"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-store"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-stress-test"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "clap 4.5.46",
  "fs-err",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-utils"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "miden-remote-prover"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "miden-remote-prover-client"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "getrandom 0.3.3",
  "miden-node-proto-build",

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.12.0 (TBD)
+
+### Changes
+
+- [BREAKING] Updated MSRV to 1.89.
+
 ## v0.11.0 (2025-08-28)
 
 ### Enhancements
