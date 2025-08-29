@@ -329,6 +329,58 @@ impl rpc_server::Rpc for StoreApi {
         }))
     }
 
+    #[instrument(
+        parent = None,
+        target = COMPONENT,
+        name = "store.rpc_server.sync_account_vault",
+        skip_all,
+        level = "debug",
+        ret(level = "debug"),
+        err
+    )]
+    async fn sync_account_vault(
+        &self,
+        request: Request<proto::rpc_store::SyncAccountVaultRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncAccountVaultResponse>, Status> {
+        let request = request.into_inner();
+        let chain_tip = self.state.latest_block_num().await;
+
+        let account_id: AccountId = read_account_id(request.account_id).map_err(|e| *e)?;
+        if !account_id.is_public() {
+            return Err(Status::invalid_argument(format!(
+                "account with ID {account_id} is not public",
+            )));
+        }
+
+        let block_from = request.block_from.into();
+        let block_to: BlockNumber = request.block_to.map_or(chain_tip, BlockNumber::from);
+
+        if block_to >= chain_tip {
+            return Err(Status::invalid_argument("block_to cannot be higher than the chain tip"));
+        }
+
+        let (last_included_block, updates) = self
+            .state
+            .sync_account_vault(account_id, block_from, block_to)
+            .await
+            .map_err(internal_error)?;
+
+        let updates = updates
+            .into_iter()
+            .map(|update| proto::rpc_store::AccountVaultUpdate {
+                vault_key: Some(update.vault_key.into()),
+                asset: update.asset.map(Into::into),
+                block_num: update.block_num.as_u32(),
+            })
+            .collect();
+
+        Ok(Response::new(proto::rpc_store::SyncAccountVaultResponse {
+            block_num: last_included_block.as_u32(),
+            chain_tip: chain_tip.as_u32(),
+            updates,
+        }))
+    }
+
     /// Returns storage map updates for the specified account within a block range.
     ///
     /// Supports cursor-based pagination for large storage maps.

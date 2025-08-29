@@ -23,6 +23,7 @@ The full gRPC API can be found [here](../../proto/proto/store.proto).
 - [GetNoteAuthenticationInfo](#getnoteauthenticationinfo)
 - [GetNotesById](#getnotesbyid)
 - [GetTransactionInputs](#gettransactioninputs)
+- [SyncAccountVault](#syncaccountvault)
 - [SyncNotes](#syncnotes)
 - [SyncState](#syncstate)
 - [SyncStorageMaps](#syncstoragemaps)
@@ -98,6 +99,16 @@ Returns a list of notes matching the provided note IDs.
 ### GetTransactionInputs
 
 Used by the `block-producer` to query state required to verify a submitted transaction.
+
+---
+
+### SyncAccountVault
+
+Returns information that allows clients to sync asset values for specific public accounts within a block range.
+
+For any `[block_from..block_to]` range, the latest known set of assets is returned for the requested account ID.
+The data can be split and a cutoff block may be selected if there are too many assets to sync. The response contains
+the chain tip so that the caller knows when it has been reached.
 
 ---
 

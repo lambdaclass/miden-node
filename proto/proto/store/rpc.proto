@@ -72,6 +72,9 @@ service Rpc {
     // additional filtering of that data on its side.
     rpc SyncState(SyncStateRequest) returns (SyncStateResponse) {}
 
+    // Returns account vault updates for specified account within a block range.
+    rpc SyncAccountVault(SyncAccountVaultRequest) returns (SyncAccountVaultResponse) {}
+
     // Returns storage map updates for specified account and storage slots within a block range.
     rpc SyncStorageMaps(SyncStorageMapsRequest) returns (SyncStorageMapsResponse) {}
 }
@@ -260,6 +263,56 @@ message SyncStateResponse {
 
     // List of all notes together with the Merkle paths from `response.block_header.note_root`.
     repeated note.NoteSyncRecord notes = 7;
+}
+
+// SYNC ACCOUNT VAULT
+// ================================================================================================
+
+// Account vault synchronization request.
+//
+// Allows clients to sync asset values for specific public accounts within a block range.
+message SyncAccountVaultRequest {
+    // Block number from which to start synchronizing.
+    fixed32 block_from = 1;
+    
+    /// Block number up to which to sync. If not specified, syncs up to the latest block.
+    ///
+    /// If specified, this block must be close to the chain tip (i.e., within 30 blocks),
+    /// otherwise an error will be returned.
+    optional fixed32 block_to = 2;
+    
+    // Account for which we want to sync asset vault.
+    account.AccountId account_id = 3;
+}
+
+message SyncAccountVaultResponse {
+    // The block number of the last update included in this response.
+    //
+    // For chunked responses, this may be less than request.block_to.
+    // If it is less than request.block_to, the user is expected to make a subsequent request 
+    // starting from the next block to this one (ie, request.block_from = block_num + 1).
+    fixed32 block_num = 1;
+
+    // Chain tip at the moment of the request.
+    fixed32 chain_tip = 2;
+    
+    // List of asset updates for the account.
+    // 
+    // Multiple updates can be returned for a single asset, and the one with a higher `block_num`
+    // is expected to be retained by the caller.
+    repeated AccountVaultUpdate updates = 3;
+}
+
+message AccountVaultUpdate {
+    // Vault key associated with the asset.
+    primitives.Digest vault_key = 1;
+
+    // Asset value related to the vault key.
+    // If not present, the asset was removed from the vault.
+    optional primitives.Asset asset = 2;
+
+    // Block number at which the above asset was updated in the account vault.
+    fixed32 block_num = 3;
 }
 
 // SYNC NOTES

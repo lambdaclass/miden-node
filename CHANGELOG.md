@@ -21,6 +21,7 @@
 - [BREAKING] Refactor protobuf messages ([#1045](https://github.com/0xMiden/miden-node/pull/#1045)).
 - [BREAKING] De-duplicate storage of code in DB (no-migration) ([#1083](https://github.com/0xMiden/miden-node/issue/#1083)).
 - Added gRPC method `SyncStorageMaps` for retrieving account storage maps ([#1140](https://github.com/0xMiden/miden-node/pull/1140), [#1132](https://github.com/0xMiden/miden-node/pull/1132)).
+- Added `SyncAccountVault` gRPC endpoints ([#1176](https://github.com/0xMiden/miden-node/pull/1176)).
 
 ### Changes
 
