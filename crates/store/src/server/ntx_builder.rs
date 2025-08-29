@@ -1,29 +1,17 @@
 use std::num::{NonZero, TryFromIntError};
 
-use miden_node_proto::{
-    domain::account::{AccountInfo, NetworkAccountPrefix},
-    generated::{
-        requests::{
-            GetBlockHeaderByNumberRequest, GetCurrentBlockchainDataRequest,
-            GetNetworkAccountDetailsByPrefixRequest, GetUnconsumedNetworkNotesRequest,
-        },
-        responses::{
-            GetBlockHeaderByNumberResponse, GetCurrentBlockchainDataResponse,
-            GetNetworkAccountDetailsByPrefixResponse, GetUnconsumedNetworkNotesResponse,
-        },
-        store::ntx_builder_server,
-    },
-};
+use miden_node_proto::domain::account::{AccountInfo, NetworkAccountPrefix};
+use miden_node_proto::generated::ntx_builder_store::ntx_builder_server;
+use miden_node_proto::generated::{self as proto};
 use miden_node_utils::ErrorReport;
-use miden_objects::{block::BlockNumber, note::Note};
+use miden_objects::block::BlockNumber;
+use miden_objects::note::Note;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
 
-use crate::{
-    COMPONENT,
-    db::Page,
-    server::api::{StoreApi, internal_error, invalid_argument},
-};
+use crate::COMPONENT;
+use crate::db::models::Page;
+use crate::server::api::{StoreApi, internal_error, invalid_argument};
 
 // NTX BUILDER ENDPOINTS
 // ================================================================================================
@@ -43,8 +31,8 @@ impl ntx_builder_server::NtxBuilder for StoreApi {
     )]
     async fn get_block_header_by_number(
         &self,
-        request: Request<GetBlockHeaderByNumberRequest>,
-    ) -> Result<Response<GetBlockHeaderByNumberResponse>, Status> {
+        request: Request<proto::shared::BlockHeaderByNumberRequest>,
+    ) -> Result<Response<proto::shared::BlockHeaderByNumberResponse>, Status> {
         self.get_block_header_by_number_inner(request).await
     }
 
@@ -63,8 +51,8 @@ impl ntx_builder_server::NtxBuilder for StoreApi {
     )]
     async fn get_current_blockchain_data(
         &self,
-        request: Request<GetCurrentBlockchainDataRequest>,
-    ) -> Result<Response<GetCurrentBlockchainDataResponse>, Status> {
+        request: Request<proto::blockchain::MaybeBlockNumber>,
+    ) -> Result<Response<proto::ntx_builder_store::CurrentBlockchainData>, Status> {
         let block_num = request.into_inner().block_num.map(BlockNumber::from);
 
         let response = match self
@@ -73,11 +61,11 @@ impl ntx_builder_server::NtxBuilder for StoreApi {
             .await
             .map_err(internal_error)?
         {
-            Some((header, peaks)) => GetCurrentBlockchainDataResponse {
+            Some((header, peaks)) => proto::ntx_builder_store::CurrentBlockchainData {
                 current_peaks: peaks.peaks().iter().map(Into::into).collect(),
                 current_block_header: Some(header.into()),
             },
-            None => GetCurrentBlockchainDataResponse {
+            None => proto::ntx_builder_store::CurrentBlockchainData {
                 current_peaks: vec![],
                 current_block_header: None,
             },
@@ -96,8 +84,8 @@ impl ntx_builder_server::NtxBuilder for StoreApi {
     )]
     async fn get_network_account_details_by_prefix(
         &self,
-        request: Request<GetNetworkAccountDetailsByPrefixRequest>,
-    ) -> Result<Response<GetNetworkAccountDetailsByPrefixResponse>, Status> {
+        request: Request<proto::ntx_builder_store::AccountIdPrefix>,
+    ) -> Result<Response<proto::ntx_builder_store::MaybeAccountDetails>, Status> {
         let request = request.into_inner();
 
         // Validate that the call is for a valid network account prefix
@@ -109,7 +97,7 @@ impl ntx_builder_server::NtxBuilder for StoreApi {
         let account_info: Option<AccountInfo> =
             self.state.get_network_account_details_by_prefix(prefix.inner()).await?;
 
-        Ok(Response::new(GetNetworkAccountDetailsByPrefixResponse {
+        Ok(Response::new(proto::ntx_builder_store::MaybeAccountDetails {
             details: account_info.map(|acc| (&acc).into()),
         }))
     }
@@ -123,9 +111,10 @@ impl ntx_builder_server::NtxBuilder for StoreApi {
     )]
     async fn get_unconsumed_network_notes(
         &self,
-        request: Request<GetUnconsumedNetworkNotesRequest>,
-    ) -> Result<Response<GetUnconsumedNetworkNotesResponse>, Status> {
+        request: Request<proto::ntx_builder_store::UnconsumedNetworkNotesRequest>,
+    ) -> Result<Response<proto::ntx_builder_store::UnconsumedNetworkNotes>, Status> {
         let request = request.into_inner();
+
         let state = self.state.clone();
 
         let size =
@@ -147,7 +136,54 @@ impl ntx_builder_server::NtxBuilder for StoreApi {
             network_notes.push(note.into());
         }
 
-        Ok(Response::new(GetUnconsumedNetworkNotesResponse {
+        Ok(Response::new(proto::ntx_builder_store::UnconsumedNetworkNotes {
+            notes: network_notes,
+            next_token: next_page.token,
+        }))
+    }
+
+    #[instrument(
+        parent = None,
+        target = COMPONENT,
+        name = "store.ntx_builder_server.get_unconsumed_network_notes_for_account",
+        skip_all,
+        err
+    )]
+    async fn get_unconsumed_network_notes_for_account(
+        &self,
+        request: Request<proto::ntx_builder_store::UnconsumedNetworkNotesForAccountRequest>,
+    ) -> Result<Response<proto::ntx_builder_store::UnconsumedNetworkNotes>, Status> {
+        let request = request.into_inner();
+        let block_num = BlockNumber::from(request.block_num);
+        let network_account_id_prefix =
+            NetworkAccountPrefix::try_from(request.network_account_id_prefix).map_err(|err| {
+                invalid_argument(err.as_report_context("invalid network_account_id_prefix"))
+            })?;
+
+        let state = self.state.clone();
+
+        let size =
+            NonZero::try_from(request.page_size as usize).map_err(|err: TryFromIntError| {
+                invalid_argument(err.as_report_context("invalid page_size"))
+            })?;
+        let page = Page { token: request.page_token, size };
+        // TODO: no need to get the whole NoteRecord here, a NetworkNote wrapper should be created
+        // instead
+        let (notes, next_page) = state
+            .get_unconsumed_network_notes_for_account(network_account_id_prefix, block_num, page)
+            .await
+            .map_err(internal_error)?;
+
+        let mut network_notes = Vec::with_capacity(notes.len());
+        for note in notes {
+            // SAFETY: Network notes are filtered in the database, so they should have details;
+            // otherwise the state would be corrupted
+            let (assets, recipient) = note.details.unwrap().into_parts();
+            let note = Note::new(assets, note.metadata, recipient);
+            network_notes.push(note.into());
+        }
+
+        Ok(Response::new(proto::ntx_builder_store::UnconsumedNetworkNotes {
             notes: network_notes,
             next_token: next_page.token,
         }))

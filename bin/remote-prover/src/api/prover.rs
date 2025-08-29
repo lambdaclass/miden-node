@@ -1,20 +1,20 @@
 use miden_block_prover::LocalBlockProver;
 use miden_node_utils::ErrorReport;
-use miden_objects::{
-    MIN_PROOF_SECURITY_LEVEL, batch::ProposedBatch, block::ProposedBlock,
-    transaction::TransactionWitness, utils::Serializable,
-};
-use miden_tx::{LocalTransactionProver, TransactionProver};
+use miden_objects::MIN_PROOF_SECURITY_LEVEL;
+use miden_objects::batch::ProposedBatch;
+use miden_objects::block::ProposedBlock;
+use miden_objects::transaction::TransactionWitness;
+use miden_objects::utils::Serializable;
+use miden_tx::LocalTransactionProver;
 use miden_tx_batch_prover::LocalBatchProver;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument};
 
-use crate::{
-    COMPONENT,
-    generated::{self as proto, ProvingRequest, ProvingResponse, api_server::Api as ProverApi},
-};
+use crate::COMPONENT;
+use crate::generated::api_server::Api as ProverApi;
+use crate::generated::{self as proto};
 
 /// Specifies the type of proof supported by the remote prover.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -97,10 +97,10 @@ impl ProverRpcApi {
         fields(id = tracing::field::Empty),
         err
     )]
-    pub fn prove_tx(
+    pub async fn prove_tx(
         &self,
         transaction_witness: TransactionWitness,
-    ) -> Result<Response<ProvingResponse>, tonic::Status> {
+    ) -> Result<Response<proto::remote_prover::Proof>, tonic::Status> {
         let Prover::Transaction(prover) = &self.prover else {
             return Err(Status::unimplemented("Transaction prover is not enabled"));
         };
@@ -115,7 +115,7 @@ impl ProverRpcApi {
         let transaction_id = proof.id();
         tracing::Span::current().record("id", tracing::field::display(&transaction_id));
 
-        Ok(Response::new(ProvingResponse { payload: proof.to_bytes() }))
+        Ok(Response::new(proto::remote_prover::Proof { payload: proof.to_bytes() }))
     }
 
     #[allow(clippy::result_large_err)]
@@ -130,7 +130,7 @@ impl ProverRpcApi {
     pub fn prove_batch(
         &self,
         proposed_batch: ProposedBatch,
-    ) -> Result<Response<ProvingResponse>, tonic::Status> {
+    ) -> Result<Response<proto::remote_prover::Proof>, tonic::Status> {
         let Prover::Batch(prover) = &self.prover else {
             return Err(Status::unimplemented("Batch prover is not enabled"));
         };
@@ -145,7 +145,7 @@ impl ProverRpcApi {
         let batch_id = proven_batch.id();
         tracing::Span::current().record("id", tracing::field::display(&batch_id));
 
-        Ok(Response::new(ProvingResponse { payload: proven_batch.to_bytes() }))
+        Ok(Response::new(proto::remote_prover::Proof { payload: proven_batch.to_bytes() }))
     }
 
     #[allow(clippy::result_large_err)]
@@ -160,7 +160,7 @@ impl ProverRpcApi {
     pub fn prove_block(
         &self,
         proposed_block: ProposedBlock,
-    ) -> Result<Response<ProvingResponse>, tonic::Status> {
+    ) -> Result<Response<proto::remote_prover::Proof>, tonic::Status> {
         let Prover::Block(prover) = &self.prover else {
             return Err(Status::unimplemented("Block prover is not enabled"));
         };
@@ -176,7 +176,7 @@ impl ProverRpcApi {
 
         tracing::Span::current().record("id", tracing::field::display(&block_id));
 
-        Ok(Response::new(ProvingResponse { payload: proven_block.to_bytes() }))
+        Ok(Response::new(proto::remote_prover::Proof { payload: proven_block.to_bytes() }))
     }
 }
 
@@ -192,18 +192,18 @@ impl ProverApi for ProverRpcApi {
     )]
     async fn prove(
         &self,
-        request: Request<ProvingRequest>,
-    ) -> Result<Response<ProvingResponse>, tonic::Status> {
+        request: Request<proto::remote_prover::ProofRequest>,
+    ) -> Result<Response<proto::remote_prover::Proof>, tonic::Status> {
         match request.get_ref().proof_type() {
-            proto::ProofType::Transaction => {
+            proto::remote_prover::ProofType::Transaction => {
                 let tx_witness = request.into_inner().try_into().map_err(invalid_argument)?;
-                self.prove_tx(tx_witness)
+                self.prove_tx(tx_witness).await
             },
-            proto::ProofType::Batch => {
+            proto::remote_prover::ProofType::Batch => {
                 let proposed_batch = request.into_inner().try_into().map_err(invalid_argument)?;
                 self.prove_batch(proposed_batch)
             },
-            proto::ProofType::Block => {
+            proto::remote_prover::ProofType::Block => {
                 let proposed_block = request.into_inner().try_into().map_err(invalid_argument)?;
                 self.prove_block(proposed_block)
             },
@@ -229,31 +229,31 @@ fn invalid_argument<E: ErrorReport>(err: E) -> Status {
 mod test {
     use std::time::Duration;
 
-    use miden_lib::transaction::TransactionKernel;
     use miden_node_utils::cors::cors_for_grpc_web_layer;
-    use miden_objects::{
-        asset::{Asset, FungibleAsset},
-        note::NoteType,
-        testing::account_id::{ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET, ACCOUNT_ID_SENDER},
-        transaction::{ProvenTransaction, TransactionScript, TransactionWitness},
+    use miden_objects::asset::{Asset, FungibleAsset};
+    use miden_objects::note::NoteType;
+    use miden_objects::testing::account_id::{
+        ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET,
+        ACCOUNT_ID_SENDER,
     };
-    use miden_testing::{Auth, MockChain};
+    use miden_objects::transaction::{ProvenTransaction, TransactionWitness};
+    use miden_testing::{Auth, MockChainBuilder};
     use miden_tx::utils::Serializable;
     use tokio::net::TcpListener;
     use tonic::Request;
     use tonic_web::GrpcWebLayer;
 
-    use crate::{
-        api::ProverRpcApi,
-        generated::{ProofType, ProvingRequest, api_client::ApiClient, api_server::ApiServer},
-    };
+    use crate::api::ProverRpcApi;
+    use crate::generated::api_client::ApiClient;
+    use crate::generated::api_server::ApiServer;
+    use crate::generated::{self as proto};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn test_prove_transaction() {
         // Start the server in the background
         let listener = TcpListener::bind("127.0.0.1:50052").await.unwrap();
 
-        let proof_type = ProofType::Transaction;
+        let proof_type = proto::remote_prover::ProofType::Transaction;
 
         let api_service = ApiServer::new(ProverRpcApi::new(proof_type.into()));
 
@@ -277,15 +277,15 @@ mod test {
         let mut client_2 = ApiClient::connect("http://127.0.0.1:50052").await.unwrap();
 
         // Create a mock transaction to send to the server
-        let mut mock_chain = MockChain::new();
-        let account = mock_chain.add_pending_existing_wallet(Auth::BasicAuth, vec![]);
+        let mut mock_chain_builder = MockChainBuilder::new();
+        let account = mock_chain_builder.add_existing_wallet(Auth::BasicAuth).unwrap();
 
         let fungible_asset_1: Asset =
             FungibleAsset::new(ACCOUNT_ID_PUBLIC_FUNGIBLE_FAUCET.try_into().unwrap(), 100)
                 .unwrap()
                 .into();
-        let note_1 = mock_chain
-            .add_pending_p2id_note(
+        let note_1 = mock_chain_builder
+            .add_p2id_note(
                 ACCOUNT_ID_SENDER.try_into().unwrap(),
                 account.id(),
                 &[fungible_asset_1],
@@ -293,42 +293,31 @@ mod test {
             )
             .unwrap();
 
-        let tx_script = TransactionScript::compile(
-            "begin
-                call.::miden::contracts::auth::basic::auth__tx_rpo_falcon512
-            end",
-            TransactionKernel::assembler(),
-        )
-        .unwrap();
+        let mock_chain = mock_chain_builder.build().unwrap();
+
         let tx_context = mock_chain
-            .build_tx_context(account.id(), &[], &[])
+            .build_tx_context(account.id(), &[note_1.id()], &[])
             .unwrap()
-            .extend_input_notes(vec![note_1])
-            .tx_script(tx_script)
             .build()
             .unwrap();
 
-        let executed_transaction = tx_context.execute().unwrap();
+        let executed_transaction = Box::pin(tx_context.execute()).await.unwrap();
 
         let transaction_witness = TransactionWitness::from(executed_transaction);
 
-        let request_1 = Request::new(ProvingRequest {
-            proof_type: ProofType::Transaction.into(),
+        let request_1 = Request::new(proto::remote_prover::ProofRequest {
+            proof_type: proto::remote_prover::ProofType::Transaction.into(),
             payload: transaction_witness.to_bytes(),
         });
 
-        let request_2 = Request::new(ProvingRequest {
-            proof_type: ProofType::Transaction.into(),
+        let request_2 = Request::new(proto::remote_prover::ProofRequest {
+            proof_type: proto::remote_prover::ProofType::Transaction.into(),
             payload: transaction_witness.to_bytes(),
         });
 
         // Send both requests concurrently
-        let (t1, t2) = (
-            tokio::spawn(async move { client.prove(request_1).await }),
-            tokio::spawn(async move { client_2.prove(request_2).await }),
-        );
-
-        let (response_1, response_2) = (t1.await.unwrap(), t2.await.unwrap());
+        let (response_1, response_2) =
+            tokio::join!(client.prove(request_1), client_2.prove(request_2));
 
         // Check the success response
         assert!(response_1.is_ok() || response_2.is_ok());

@@ -1,10 +1,8 @@
-use miden_objects::{
-    Digest,
-    account::AccountId,
-    crypto::rand::{FeltRng, RpoRandomCoin},
-    testing::account_id::AccountIdBuilder,
-    transaction::TransactionId,
-};
+use miden_objects::Word;
+use miden_objects::account::AccountId;
+use miden_objects::crypto::rand::{FeltRng, RpoRandomCoin};
+use miden_objects::testing::account_id::AccountIdBuilder;
+use miden_objects::transaction::TransactionId;
 
 mod proven_tx;
 
@@ -32,9 +30,7 @@ impl Random {
 
         println!("Random::with_random_seed: {seed:?}");
 
-        let seed = Digest::from(seed).into();
-
-        Self(RpoRandomCoin::new(seed))
+        Self(RpoRandomCoin::new(Word::from(seed)))
     }
 
     pub fn draw_tx_id(&mut self) -> TransactionId {
@@ -45,7 +41,7 @@ impl Random {
         AccountIdBuilder::new().build_with_rng(&mut self.0)
     }
 
-    pub fn draw_digest(&mut self) -> Digest {
-        self.0.draw_word().into()
+    pub fn draw_digest(&mut self) -> Word {
+        self.0.draw_word()
     }
 }

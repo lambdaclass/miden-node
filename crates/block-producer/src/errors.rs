@@ -1,12 +1,12 @@
 use miden_block_prover::ProvenBlockError;
 use miden_node_proto::errors::ConversionError;
-use miden_node_utils::{ErrorReport, formatting::format_opt};
-use miden_objects::{
-    Digest, ProposedBatchError, ProposedBlockError, ProvenBatchError,
-    block::BlockNumber,
-    note::{NoteId, Nullifier},
-    transaction::TransactionId,
-};
+use miden_node_utils::ErrorReport;
+use miden_node_utils::formatting::format_opt;
+use miden_objects::account::AccountId;
+use miden_objects::block::BlockNumber;
+use miden_objects::note::{NoteId, Nullifier};
+use miden_objects::transaction::TransactionId;
+use miden_objects::{ProposedBatchError, ProposedBlockError, ProvenBatchError, Word};
 use miden_remote_prover_client::RemoteProverClientError;
 use thiserror::Error;
 use tokio::task::JoinError;
@@ -56,8 +56,8 @@ pub enum VerifyTxError {
     /// The account's initial commitment did not match the current account's commitment
     #[error("transaction's initial state commitment {tx_initial_account_commitment} does not match the account's current value of {}", format_opt(.current_account_commitment.as_ref()))]
     IncorrectAccountInitialCommitment {
-        tx_initial_account_commitment: Digest,
-        current_account_commitment: Option<Digest>,
+        tx_initial_account_commitment: Word,
+        current_account_commitment: Option<Word>,
     },
 
     /// Failed to retrieve transaction inputs from the store
@@ -122,6 +122,23 @@ impl From<AddTransactionError> for tonic::Status {
     }
 }
 
+// Submit proven batch by user errors
+// =================================================================================================
+
+#[derive(Debug, Error)]
+pub enum SubmitProvenBatchError {
+    #[error("batch deserialization failed")]
+    Deserialization(#[source] miden_objects::utils::DeserializationError),
+}
+
+impl From<SubmitProvenBatchError> for tonic::Status {
+    fn from(value: SubmitProvenBatchError) -> Self {
+        match value {
+            SubmitProvenBatchError::Deserialization(_) => Self::invalid_argument(value.as_report()),
+        }
+    }
+}
+
 // Batch building errors
 // =================================================================================================
 
@@ -181,6 +198,8 @@ pub enum BuildBlockError {
 /// Errors returned by the [`StoreClient`](crate::store::StoreClient).
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("account Id prefix already exists: {0}")]
+    DuplicateAccountIdPrefix(AccountId),
     #[error("gRPC client error")]
     GrpcClientError(Box<tonic::Status>),
     #[error("malformed response from store: {0}")]

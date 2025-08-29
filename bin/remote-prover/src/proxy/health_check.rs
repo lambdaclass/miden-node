@@ -1,13 +1,15 @@
 use miden_remote_prover::COMPONENT;
-use pingora::{prelude::sleep, server::ShutdownWatch, services::background::BackgroundService};
+use pingora::prelude::sleep;
+use pingora::server::ShutdownWatch;
+use pingora::services::background::BackgroundService;
 use tonic::async_trait;
 use tracing::{debug_span, error};
 
 use super::LoadBalancerState;
 
-/// Implement the BackgroundService trait for the LoadBalancer
+/// Implement the [`BackgroundService`] trait for the [`LoadBalancerState`].
 ///
-/// A [BackgroundService] can be run as part of a Pingora application to add supporting logic that
+/// A [`BackgroundService`] can be run as part of a Pingora application to add supporting logic that
 /// exists outside of the request/response lifecycle.
 ///
 /// We use this implementation to periodically check the health of the workers and update the list
@@ -25,9 +27,16 @@ impl BackgroundService for LoadBalancerState {
     ///
     /// # Errors
     /// - If the worker has an invalid URI.
-    async fn start(&self, mut _shutdown: ShutdownWatch) {
+    async fn start(&self, shutdown: ShutdownWatch) {
         Box::pin(async move {
             loop {
+                // Check if the shutdown signal has been received
+                {
+                    if *shutdown.borrow() {
+                        break;
+                    }
+                }
+
                 // Create a new spawn to perform the health check
                 let span = debug_span!(target: COMPONENT, "proxy.health_check");
                 let _guard = span.enter();
@@ -48,6 +57,10 @@ impl BackgroundService for LoadBalancerState {
                         worker.update_status(status_result);
                     }
                 }
+
+                // Update the status cache with current worker status
+                self.update_status_cache().await;
+
                 // Sleep for the defined interval before the next health check
                 sleep(self.health_check_interval).await;
             }

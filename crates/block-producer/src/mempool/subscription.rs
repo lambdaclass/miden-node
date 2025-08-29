@@ -1,13 +1,10 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Mul,
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Mul;
 
-use miden_node_proto::domain::{mempool::MempoolEvent, note::NetworkNote};
-use miden_objects::{
-    block::{BlockHeader, BlockNumber},
-    transaction::{OutputNote, TransactionId},
-};
+use miden_node_proto::domain::mempool::MempoolEvent;
+use miden_node_proto::domain::note::NetworkNote;
+use miden_objects::block::{BlockHeader, BlockNumber};
+use miden_objects::transaction::{OutputNote, TransactionId};
 use tokio::sync::mpsc;
 
 use crate::domain::transaction::AuthenticatedTransaction;
@@ -105,13 +102,17 @@ impl SubscriptionProvider {
 
     pub(super) fn block_committed(&mut self, header: BlockHeader, txs: Vec<TransactionId>) {
         self.chain_tip = header.block_num();
-        txs.iter().for_each(|tx| self.inflight_txs.remove(tx));
+        for tx in &txs {
+            self.inflight_txs.remove(tx);
+        }
 
         Self::send_event(&mut self.subscription, MempoolEvent::BlockCommitted { header, txs });
     }
 
     pub(super) fn txs_reverted(&mut self, txs: BTreeSet<TransactionId>) {
-        txs.iter().for_each(|tx| self.inflight_txs.remove(tx));
+        for tx in &txs {
+            self.inflight_txs.remove(tx);
+        }
         Self::send_event(&mut self.subscription, MempoolEvent::TransactionsReverted(txs));
     }
 

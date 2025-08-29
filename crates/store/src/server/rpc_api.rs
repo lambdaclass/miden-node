@@ -1,38 +1,23 @@
 use std::collections::BTreeSet;
 
-use miden_node_proto::{
-    convert,
-    domain::account::{AccountInfo, AccountProofRequest},
-    generated::{
-        account::AccountSummary,
-        requests::{
-            CheckNullifiersByPrefixRequest, CheckNullifiersRequest, GetAccountDetailsRequest,
-            GetAccountProofsRequest, GetAccountStateDeltaRequest, GetBlockByNumberRequest,
-            GetBlockHeaderByNumberRequest, GetNotesByIdRequest, SyncNoteRequest, SyncStateRequest,
-        },
-        responses::{
-            CheckNullifiersByPrefixResponse, CheckNullifiersResponse, GetAccountDetailsResponse,
-            GetAccountProofsResponse, GetAccountStateDeltaResponse, GetBlockByNumberResponse,
-            GetBlockHeaderByNumberResponse, GetNotesByIdResponse, NullifierUpdate,
-            StoreStatusResponse, SyncNoteResponse, SyncStateResponse,
-        },
-        store::rpc_server,
-        transaction::TransactionSummary,
-    },
-    try_convert,
-};
-use miden_objects::{
-    account::AccountId, block::BlockNumber, crypto::hash::rpo::RpoDigest, note::NoteId,
-    utils::Serializable,
-};
+use miden_node_proto::domain::account::{AccountInfo, AccountProofRequest};
+use miden_node_proto::generated::rpc_store::rpc_server;
+use miden_node_proto::generated::{self as proto};
+use miden_node_proto::{convert, try_convert};
+use miden_objects::Word;
+use miden_objects::account::AccountId;
+use miden_objects::block::BlockNumber;
+use miden_objects::note::NoteId;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument};
 
-use crate::{
-    COMPONENT,
-    server::api::{
-        StoreApi, internal_error, read_account_id, read_account_ids, validate_nullifiers,
-    },
+use crate::COMPONENT;
+use crate::server::api::{
+    StoreApi,
+    internal_error,
+    read_account_id,
+    read_account_ids,
+    validate_nullifiers,
 };
 
 // CLIENT ENDPOINTS
@@ -54,8 +39,8 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn get_block_header_by_number(
         &self,
-        request: Request<GetBlockHeaderByNumberRequest>,
-    ) -> Result<Response<GetBlockHeaderByNumberResponse>, Status> {
+        request: Request<proto::shared::BlockHeaderByNumberRequest>,
+    ) -> Result<Response<proto::shared::BlockHeaderByNumberResponse>, Status> {
         self.get_block_header_by_number_inner(request).await
     }
 
@@ -74,9 +59,9 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn check_nullifiers(
         &self,
-        request: Request<CheckNullifiersRequest>,
-    ) -> Result<Response<CheckNullifiersResponse>, Status> {
-        // Validate the nullifiers and convert them to Digest values. Stop on first error.
+        request: Request<proto::rpc_store::NullifierList>,
+    ) -> Result<Response<proto::rpc_store::CheckNullifiersResponse>, Status> {
+        // Validate the nullifiers and convert them to Word values. Stop on first error.
         let request = request.into_inner();
 
         let nullifiers = validate_nullifiers(&request.nullifiers)?;
@@ -84,7 +69,9 @@ impl rpc_server::Rpc for StoreApi {
         // Query the state for the request's nullifiers
         let proofs = self.state.check_nullifiers(&nullifiers).await;
 
-        Ok(Response::new(CheckNullifiersResponse { proofs: convert(proofs) }))
+        Ok(Response::new(proto::rpc_store::CheckNullifiersResponse {
+            proofs: convert(proofs).collect(),
+        }))
     }
 
     /// Returns nullifiers that match the specified prefixes and have been consumed.
@@ -101,8 +88,8 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn check_nullifiers_by_prefix(
         &self,
-        request: Request<CheckNullifiersByPrefixRequest>,
-    ) -> Result<Response<CheckNullifiersByPrefixResponse>, Status> {
+        request: Request<proto::rpc_store::CheckNullifiersByPrefixRequest>,
+    ) -> Result<Response<proto::rpc_store::CheckNullifiersByPrefixResponse>, Status> {
         let request = request.into_inner();
 
         if request.prefix_len != 16 {
@@ -118,13 +105,15 @@ impl rpc_server::Rpc for StoreApi {
             )
             .await?
             .into_iter()
-            .map(|nullifier_info| NullifierUpdate {
-                nullifier: Some(nullifier_info.nullifier.into()),
-                block_num: nullifier_info.block_num.as_u32(),
+            .map(|nullifier_info| {
+                proto::rpc_store::check_nullifiers_by_prefix_response::NullifierUpdate {
+                    nullifier: Some(nullifier_info.nullifier.into()),
+                    block_num: nullifier_info.block_num.as_u32(),
+                }
             })
             .collect();
 
-        Ok(Response::new(CheckNullifiersByPrefixResponse { nullifiers }))
+        Ok(Response::new(proto::rpc_store::CheckNullifiersByPrefixResponse { nullifiers }))
     }
 
     /// Returns info which can be used by the client to sync up to the latest state of the chain
@@ -140,8 +129,8 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn sync_state(
         &self,
-        request: Request<SyncStateRequest>,
-    ) -> Result<Response<SyncStateResponse>, Status> {
+        request: Request<proto::rpc_store::SyncStateRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncStateResponse>, Status> {
         let request = request.into_inner();
 
         let account_ids: Vec<AccountId> = read_account_ids(&request.account_ids)?;
@@ -155,7 +144,7 @@ impl rpc_server::Rpc for StoreApi {
         let accounts = state
             .account_updates
             .into_iter()
-            .map(|account_info| AccountSummary {
+            .map(|account_info| proto::account::AccountSummary {
                 account_id: Some(account_info.account_id.into()),
                 account_commitment: Some(account_info.account_commitment.into()),
                 block_num: account_info.block_num.as_u32(),
@@ -165,7 +154,7 @@ impl rpc_server::Rpc for StoreApi {
         let transactions = state
             .transactions
             .into_iter()
-            .map(|transaction_summary| TransactionSummary {
+            .map(|transaction_summary| proto::transaction::TransactionSummary {
                 account_id: Some(transaction_summary.account_id.into()),
                 block_num: transaction_summary.block_num.as_u32(),
                 transaction_id: Some(transaction_summary.transaction_id.into()),
@@ -174,7 +163,7 @@ impl rpc_server::Rpc for StoreApi {
 
         let notes = state.notes.into_iter().map(Into::into).collect();
 
-        Ok(Response::new(SyncStateResponse {
+        Ok(Response::new(proto::rpc_store::SyncStateResponse {
             chain_tip: self.state.latest_block_num().await.as_u32(),
             block_header: Some(state.block_header.into()),
             mmr_delta: Some(delta.into()),
@@ -196,8 +185,8 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn sync_notes(
         &self,
-        request: Request<SyncNoteRequest>,
-    ) -> Result<Response<SyncNoteResponse>, Status> {
+        request: Request<proto::rpc_store::SyncNotesRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncNotesResponse>, Status> {
         let request = request.into_inner();
 
         let (state, mmr_proof) = self
@@ -208,17 +197,18 @@ impl rpc_server::Rpc for StoreApi {
 
         let notes = state.notes.into_iter().map(Into::into).collect();
 
-        Ok(Response::new(SyncNoteResponse {
+        Ok(Response::new(proto::rpc_store::SyncNotesResponse {
             chain_tip: self.state.latest_block_num().await.as_u32(),
             block_header: Some(state.block_header.into()),
-            mmr_path: Some((&mmr_proof.merkle_path).into()),
+            mmr_path: Some(mmr_proof.merkle_path.into()),
             notes,
         }))
     }
 
-    /// Returns a list of Note's for the specified NoteId's.
+    /// Returns a list of [`Note`]s for the specified [`NoteId`]s.
     ///
-    /// If the list is empty or no Note matched the requested NoteId and empty list is returned.
+    /// If the list is empty or no [`Note`] matched the requested [`NoteId`] and empty list is
+    /// returned.
     #[instrument(
         parent = None,
         target = COMPONENT,
@@ -230,13 +220,14 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn get_notes_by_id(
         &self,
-        request: Request<GetNotesByIdRequest>,
-    ) -> Result<Response<GetNotesByIdResponse>, Status> {
+        request: Request<proto::note::NoteIdList>,
+    ) -> Result<Response<proto::note::CommittedNoteList>, Status> {
         info!(target: COMPONENT, ?request);
 
-        let note_ids = request.into_inner().note_ids;
+        let note_ids = request.into_inner().ids;
 
-        let note_ids: Vec<RpoDigest> = try_convert(note_ids)
+        let note_ids: Vec<Word> = try_convert(note_ids)
+            .collect::<Result<_, _>>()
             .map_err(|err| Status::invalid_argument(format!("Invalid NoteId: {err}")))?;
 
         let note_ids: Vec<NoteId> = note_ids.into_iter().map(From::from).collect();
@@ -249,7 +240,7 @@ impl rpc_server::Rpc for StoreApi {
             .map(Into::into)
             .collect();
 
-        Ok(Response::new(GetNotesByIdResponse { notes }))
+        Ok(Response::new(proto::note::CommittedNoteList { notes }))
     }
 
     /// Returns details for public (public) account by id.
@@ -264,15 +255,15 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn get_account_details(
         &self,
-        request: Request<GetAccountDetailsRequest>,
-    ) -> Result<Response<GetAccountDetailsResponse>, Status> {
+        request: Request<proto::account::AccountId>,
+    ) -> Result<Response<proto::account::AccountDetails>, Status> {
         let request = request.into_inner();
-        let account_id = read_account_id(request.account_id).map_err(|err| *err)?;
+        let account_id = read_account_id(Some(request)).map_err(|err| *err)?;
         let account_info: AccountInfo = self.state.get_account_details(account_id).await?;
 
-        Ok(Response::new(GetAccountDetailsResponse {
-            details: Some((&account_info).into()),
-        }))
+        // TODO: revisit this, previous implementation was just returning only the summary, but it
+        // is weird since the details are not empty.
+        Ok(Response::new((&account_info).into()))
     }
 
     #[instrument(
@@ -286,15 +277,15 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn get_block_by_number(
         &self,
-        request: Request<GetBlockByNumberRequest>,
-    ) -> Result<Response<GetBlockByNumberResponse>, Status> {
+        request: Request<proto::blockchain::BlockNumber>,
+    ) -> Result<Response<proto::blockchain::MaybeBlock>, Status> {
         let request = request.into_inner();
 
         debug!(target: COMPONENT, ?request);
 
         let block = self.state.load_block(request.block_num.into()).await?;
 
-        Ok(Response::new(GetBlockByNumberResponse { block }))
+        Ok(Response::new(proto::blockchain::MaybeBlock { block }))
     }
 
     #[instrument(
@@ -308,21 +299,22 @@ impl rpc_server::Rpc for StoreApi {
     )]
     async fn get_account_proofs(
         &self,
-        request: Request<GetAccountProofsRequest>,
-    ) -> Result<Response<GetAccountProofsResponse>, Status> {
+        request: Request<proto::rpc_store::AccountProofsRequest>,
+    ) -> Result<Response<proto::rpc_store::AccountProofs>, Status> {
         debug!(target: COMPONENT, ?request);
-        let GetAccountProofsRequest {
+        let proto::rpc_store::AccountProofsRequest {
             account_requests,
             include_headers,
             code_commitments,
         } = request.into_inner();
 
         let include_headers = include_headers.unwrap_or_default();
-        let request_code_commitments: BTreeSet<RpoDigest> = try_convert(code_commitments)
+        let request_code_commitments: BTreeSet<Word> = try_convert(code_commitments)
+            .collect::<Result<_, _>>()
             .map_err(|err| Status::invalid_argument(format!("Invalid code commitment: {err}")))?;
 
         let account_requests: Vec<AccountProofRequest> =
-            try_convert(account_requests).map_err(|err| {
+            try_convert(account_requests).collect::<Result<_, _>>().map_err(|err| {
                 Status::invalid_argument(format!("Invalid account proofs request: {err}"))
             })?;
 
@@ -331,7 +323,7 @@ impl rpc_server::Rpc for StoreApi {
             .get_account_proofs(account_requests, request_code_commitments, include_headers)
             .await?;
 
-        Ok(Response::new(GetAccountProofsResponse {
+        Ok(Response::new(proto::rpc_store::AccountProofs {
             block_num: block_num.as_u32(),
             account_proofs: infos,
         }))
@@ -340,32 +332,115 @@ impl rpc_server::Rpc for StoreApi {
     #[instrument(
         parent = None,
         target = COMPONENT,
-        name = "store.rpc_server.get_account_state_delta",
+        name = "store.rpc_server.sync_account_vault",
         skip_all,
         level = "debug",
         ret(level = "debug"),
         err
     )]
-    async fn get_account_state_delta(
+    async fn sync_account_vault(
         &self,
-        request: Request<GetAccountStateDeltaRequest>,
-    ) -> Result<Response<GetAccountStateDeltaResponse>, Status> {
+        request: Request<proto::rpc_store::SyncAccountVaultRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncAccountVaultResponse>, Status> {
+        let request = request.into_inner();
+        let chain_tip = self.state.latest_block_num().await;
+
+        let account_id: AccountId = read_account_id(request.account_id).map_err(|e| *e)?;
+        if !account_id.is_public() {
+            return Err(Status::invalid_argument(format!(
+                "account with ID {account_id} is not public",
+            )));
+        }
+
+        let block_from = request.block_from.into();
+        let block_to: BlockNumber = request.block_to.map_or(chain_tip, BlockNumber::from);
+
+        if block_to >= chain_tip {
+            return Err(Status::invalid_argument("block_to cannot be higher than the chain tip"));
+        }
+
+        let (last_included_block, updates) = self
+            .state
+            .sync_account_vault(account_id, block_from, block_to)
+            .await
+            .map_err(internal_error)?;
+
+        let updates = updates
+            .into_iter()
+            .map(|update| proto::rpc_store::AccountVaultUpdate {
+                vault_key: Some(update.vault_key.into()),
+                asset: update.asset.map(Into::into),
+                block_num: update.block_num.as_u32(),
+            })
+            .collect();
+
+        Ok(Response::new(proto::rpc_store::SyncAccountVaultResponse {
+            block_num: last_included_block.as_u32(),
+            chain_tip: chain_tip.as_u32(),
+            updates,
+        }))
+    }
+
+    /// Returns storage map updates for the specified account within a block range.
+    ///
+    /// Supports cursor-based pagination for large storage maps.
+    #[instrument(
+        parent = None,
+        target = COMPONENT,
+        name = "store.rpc_server.sync_storage_maps",
+        skip_all,
+        level = "debug",
+        ret(level = "debug"),
+        err
+    )]
+    async fn sync_storage_maps(
+        &self,
+        request: Request<proto::rpc_store::SyncStorageMapsRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncStorageMapsResponse>, Status> {
         let request = request.into_inner();
 
-        debug!(target: COMPONENT, ?request);
+        let account_id = read_account_id(request.account_id).map_err(|e| *e)?;
 
-        let account_id = read_account_id(request.account_id).map_err(|err| *err)?;
-        let delta = self
+        if !account_id.is_public() {
+            return Err(Status::invalid_argument(format!(
+                "account with ID {account_id} is not public"
+            )));
+        }
+
+        let block_from = BlockNumber::from(request.block_from);
+        let chain_tip = self.state.latest_block_num().await;
+
+        let block_to = match request.block_to {
+            Some(block_to) => BlockNumber::from(block_to),
+            None => chain_tip,
+        };
+
+        if block_from > block_to {
+            return Err(Status::invalid_argument("block_from cannot be greater than block_to"));
+        }
+
+        let storage_maps_page = self
             .state
-            .get_account_state_delta(
-                account_id,
-                request.from_block_num.into(),
-                request.to_block_num.into(),
-            )
-            .await?
-            .map(|delta| delta.to_bytes());
+            .get_storage_map_sync_values(account_id, block_from, block_to)
+            .await
+            .map_err(internal_error)?;
 
-        Ok(Response::new(GetAccountStateDeltaResponse { delta }))
+        let updates = storage_maps_page
+            .values
+            .into_iter()
+            .map(|map_value| proto::rpc_store::StorageMapUpdate {
+                slot_index: u32::from(map_value.slot_index),
+                key: Some(map_value.key.into()),
+                value: Some(map_value.value.into()),
+                block_num: map_value.block_num.as_u32(),
+            })
+            .collect();
+
+        Ok(Response::new(proto::rpc_store::SyncStorageMapsResponse {
+            block_num: storage_maps_page.last_block_included.as_u32(),
+            chain_tip: chain_tip.as_u32(),
+            updates,
+        }))
     }
 
     #[instrument(
@@ -377,8 +452,11 @@ impl rpc_server::Rpc for StoreApi {
         ret(level = "debug"),
         err
     )]
-    async fn status(&self, _request: Request<()>) -> Result<Response<StoreStatusResponse>, Status> {
-        Ok(Response::new(StoreStatusResponse {
+    async fn status(
+        &self,
+        _request: Request<()>,
+    ) -> Result<Response<proto::rpc_store::StoreStatus>, Status> {
+        Ok(Response::new(proto::rpc_store::StoreStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             status: "connected".to_string(),
             chain_tip: self.state.latest_block_num().await.as_u32(),

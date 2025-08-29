@@ -1,8 +1,12 @@
 use core::time::Duration;
 use std::net::IpAddr;
 
-use miden_objects::{Digest, account::AccountId, batch::BatchId, block::BlockNumber};
-use opentelemetry::{Key, Value, trace::Status};
+use miden_objects::Word;
+use miden_objects::account::AccountId;
+use miden_objects::batch::BatchId;
+use miden_objects::block::BlockNumber;
+use opentelemetry::trace::Status;
+use opentelemetry::{Key, Value};
 
 use crate::ErrorReport;
 
@@ -17,7 +21,7 @@ impl ToValue for Duration {
     }
 }
 
-impl ToValue for Digest {
+impl ToValue for Word {
     fn to_value(&self) -> Value {
         self.to_hex().into()
     }

@@ -46,13 +46,14 @@ fn rpc_trace_fn<T>(request: &http::Request<T>) -> tracing::Span {
         Some("CheckNullifiers") => rpc_span!("rpc.rpc", "CheckNullifiers"),
         Some("CheckNullifiersByPrefix") => rpc_span!("rpc.rpc", "CheckNullifiersByPrefix"),
         Some("GetBlockHeaderByNumber") => rpc_span!("rpc.rpc", "GetBlockHeaderByNumber"),
+        Some("SyncStorageMaps") => rpc_span!("rpc.rpc", "SyncStorageMaps"),
+        Some("SyncAccountVault") => rpc_span!("rpc.rpc", "SyncAccountVault"),
         Some("SyncState") => rpc_span!("rpc.rpc", "SyncState"),
         Some("SyncNotes") => rpc_span!("rpc.rpc", "SyncNotes"),
         Some("GetNotesById") => rpc_span!("rpc.rpc", "GetNotesById"),
         Some("SubmitProvenTransaction") => rpc_span!("rpc.rpc", "SubmitProvenTransaction"),
         Some("GetAccountDetails") => rpc_span!("rpc.rpc", "GetAccountDetails"),
         Some("GetBlockByNumber") => rpc_span!("rpc.rpc", "GetBlockByNumber"),
-        Some("GetAccountStateDelta") => rpc_span!("rpc.rpc", "GetAccountStateDelta"),
         Some("GetAccountProofs") => rpc_span!("rpc.rpc", "GetAccountProofs"),
         Some("Status") => rpc_span!("rpc.rpc", "Status"),
         _ => rpc_span!("rpc.rpc", "Unknown"),
@@ -82,7 +83,6 @@ fn store_rpc_trace_fn<T>(request: &http::Request<T>) -> tracing::Span {
         "CheckNullifiersByPrefix" => rpc_span!("store.rpc.rpc", "CheckNullifiersByPrefix"),
         "GetAccountDetails" => rpc_span!("store.rpc.rpc", "GetAccountDetails"),
         "GetAccountProofs" => rpc_span!("store.rpc.rpc", "GetAccountProofs"),
-        "GetAccountStateDelta" => rpc_span!("store.rpc.rpc", "GetAccountStateDelta"),
         "GetBlockByNumber" => rpc_span!("store.rpc.rpc", "GetBlockByNumber"),
         "GetBlockHeaderByNumber" => rpc_span!("store.rpc.rpc", "GetBlockHeaderByNumber"),
         "GetNotesById" => rpc_span!("store.rpc.rpc", "GetNotesById"),
@@ -250,10 +250,10 @@ impl opentelemetry::propagation::Injector for MetadataInjector<'_> {
     /// Set a key and value in the `MetadataMap`.  Does nothing if the key or value are not valid
     /// inputs
     fn set(&mut self, key: &str, value: String) {
-        if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes()) {
-            if let Ok(val) = tonic::metadata::MetadataValue::try_from(&value) {
-                self.0.insert(key, val);
-            }
+        if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
+            && let Ok(val) = tonic::metadata::MetadataValue::try_from(&value)
+        {
+            self.0.insert(key, val);
         }
     }
 }

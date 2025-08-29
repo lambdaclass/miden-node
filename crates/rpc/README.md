@@ -9,7 +9,7 @@ For more information on the installation and operation of this component, please
 
 ## API overview
 
-The full gRPC method definitions can be found in the [rpc-proto](../rpc-proto/README.md) crate.
+The full gRPC method definitions can be found in the [proto](../proto/README.md) crate.
 
 <!--toc:start-->
 
@@ -17,13 +17,14 @@ The full gRPC method definitions can be found in the [rpc-proto](../rpc-proto/RE
 - [CheckNullifiersByPrefix](#checknullifiersbyprefix)
 - [GetAccountDetails](#getaccountdetails)
 - [GetAccountProofs](#getaccountproofs)
-- [GetAccountStateDelta](#getaccountstatedelta)
 - [GetBlockByNumber](#getblockbynumber)
 - [GetBlockHeaderByNumber](#getblockheaderbynumber)
 - [GetNotesById](#getnotesbyid)
 - [SubmitProvenTransaction](#submitproventransaction)
+- [SyncAccountVault](#SyncAccountVault)
 - [SyncNotes](#syncnotes)
 - [SyncState](#syncstate)
+- [SyncStorageMaps](#syncstoragemaps)
 
 <!--toc:end-->
 
@@ -37,7 +38,7 @@ Returns a nullifier proof for each of the requested nullifiers.
 
 ### CheckNullifiersByPrefix
 
-Returns a list of nullifiers recorded in the node that match the specified prefixes and were created at or after 
+Returns a list of nullifiers recorded in the node that match the specified prefixes and were created at or after
 the given block height.
 
 Only 16-bit prefixes are supported at this time.
@@ -53,12 +54,6 @@ Returns the latest state of an account with the specified ID.
 ### GetAccountProofs
 
 Returns the latest state proofs of the specified accounts.
-
----
-
-### GetAccountStateDelta
-
-Returns delta of the account states in the range from `from_block_num` (exclusive) to `to_block_num` (inclusive).
 
 ---
 
@@ -84,6 +79,16 @@ Returns a list of notes matching the provided note IDs.
 ### SubmitProvenTransaction
 
 Submits proven transaction to the Miden network.
+
+---
+
+### SyncAccountVault
+
+Returns information that allows clients to sync asset values for specific public accounts within a block range.
+
+For any `[block_from..block_to]` range, the latest known set of assets is returned for the requested account ID.
+The data can be split and a cutoff block may be selected if there are too many assets to sync. The response contains
+the chain tip so that the caller knows when it has been reached.
 
 ---
 
@@ -113,8 +118,19 @@ number in the chain. Client is expected to repeat these requests in a loop until
 Each request also returns info about new notes, accounts, etc. created. It also returns Chain MMR delta that can be
 used to update the state of Chain MMR. This includes both chain MMR peaks and chain MMR nodes.
 
-For preserving some degree of privacy, note tags contain only high part of hashes. Thus, returned data contains excessive 
+For preserving some degree of privacy, note tags contain only high part of hashes. Thus, returned data contains excessive
 notes, client can make additional filtering of that data on its side.
+
+---
+
+### SyncStorageMaps
+
+Returns storage map synchronization data for a specified public account within a given block range. This method allows clients to efficiently sync the storage map state of an account by retrieving only the changes that occurred between two blocks.
+
+Caller specifies the `account_id` of the public account and the block range (`block_from`, `block_to`) for which to retrieve storage updates. The response includes all storage map key-value updates that occurred within that range, along with the last block included in the sync and the current chain tip.
+
+This endpoint enables clients to maintain an updated view of account storage.
+
 ---
 
 ## License

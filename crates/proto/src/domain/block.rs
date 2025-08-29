@@ -1,24 +1,18 @@
 use std::collections::BTreeMap;
 
-use miden_objects::{
-    block::{BlockHeader, BlockInputs, NullifierWitness},
-    note::{NoteId, NoteInclusionProof},
-    transaction::PartialBlockchain,
-    utils::{Deserializable, Serializable},
-};
+use miden_objects::account::AccountId;
+use miden_objects::block::{BlockHeader, BlockInputs, FeeParameters, NullifierWitness};
+use miden_objects::note::{NoteId, NoteInclusionProof};
+use miden_objects::transaction::PartialBlockchain;
+use miden_objects::utils::{Deserializable, Serializable};
 
-use crate::{
-    AccountWitnessRecord, NullifierWitnessRecord,
-    errors::{ConversionError, MissingFieldHelper},
-    generated::{
-        block as proto, note::NoteInclusionInBlockProof, responses::GetBlockInputsResponse,
-    },
-};
+use crate::errors::{ConversionError, MissingFieldHelper};
+use crate::{AccountWitnessRecord, NullifierWitnessRecord, generated as proto};
 
 // BLOCK HEADER
 // ================================================================================================
 
-impl From<&BlockHeader> for proto::BlockHeader {
+impl From<&BlockHeader> for proto::blockchain::BlockHeader {
     fn from(header: &BlockHeader) -> Self {
         Self {
             version: header.version(),
@@ -32,63 +26,71 @@ impl From<&BlockHeader> for proto::BlockHeader {
             tx_kernel_commitment: Some(header.tx_kernel_commitment().into()),
             proof_commitment: Some(header.proof_commitment().into()),
             timestamp: header.timestamp(),
+            fee_parameters: Some(header.fee_parameters().into()),
         }
     }
 }
 
-impl From<BlockHeader> for proto::BlockHeader {
+impl From<BlockHeader> for proto::blockchain::BlockHeader {
     fn from(header: BlockHeader) -> Self {
         (&header).into()
     }
 }
 
-impl TryFrom<&proto::BlockHeader> for BlockHeader {
+impl TryFrom<&proto::blockchain::BlockHeader> for BlockHeader {
     type Error = ConversionError;
 
-    fn try_from(value: &proto::BlockHeader) -> Result<Self, Self::Error> {
+    fn try_from(value: &proto::blockchain::BlockHeader) -> Result<Self, Self::Error> {
         value.try_into()
     }
 }
 
-impl TryFrom<proto::BlockHeader> for BlockHeader {
+impl TryFrom<proto::blockchain::BlockHeader> for BlockHeader {
     type Error = ConversionError;
 
-    fn try_from(value: proto::BlockHeader) -> Result<Self, Self::Error> {
+    fn try_from(value: proto::blockchain::BlockHeader) -> Result<Self, Self::Error> {
         Ok(BlockHeader::new(
             value.version,
             value
                 .prev_block_commitment
-                .ok_or(proto::BlockHeader::missing_field(stringify!(prev_block_commitment)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(
+                    prev_block_commitment
+                )))?
                 .try_into()?,
             value.block_num.into(),
             value
                 .chain_commitment
-                .ok_or(proto::BlockHeader::missing_field(stringify!(chain_commitment)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(chain_commitment)))?
                 .try_into()?,
             value
                 .account_root
-                .ok_or(proto::BlockHeader::missing_field(stringify!(account_root)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(account_root)))?
                 .try_into()?,
             value
                 .nullifier_root
-                .ok_or(proto::BlockHeader::missing_field(stringify!(nullifier_root)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(nullifier_root)))?
                 .try_into()?,
             value
                 .note_root
-                .ok_or(proto::BlockHeader::missing_field(stringify!(note_root)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(note_root)))?
                 .try_into()?,
             value
                 .tx_commitment
-                .ok_or(proto::BlockHeader::missing_field(stringify!(tx_commitment)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(tx_commitment)))?
                 .try_into()?,
             value
                 .tx_kernel_commitment
-                .ok_or(proto::BlockHeader::missing_field(stringify!(tx_kernel_commitment)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(
+                    tx_kernel_commitment
+                )))?
                 .try_into()?,
             value
                 .proof_commitment
-                .ok_or(proto::BlockHeader::missing_field(stringify!(proof_commitment)))?
+                .ok_or(proto::blockchain::BlockHeader::missing_field(stringify!(proof_commitment)))?
                 .try_into()?,
+            FeeParameters::try_from(value.fee_parameters.ok_or(
+                proto::blockchain::FeeParameters::missing_field(stringify!(fee_parameters)),
+            )?)?,
             value.timestamp,
         ))
     }
@@ -97,7 +99,7 @@ impl TryFrom<proto::BlockHeader> for BlockHeader {
 // BLOCK INPUTS
 // ================================================================================================
 
-impl From<BlockInputs> for GetBlockInputsResponse {
+impl From<BlockInputs> for proto::block_producer_store::BlockInputs {
     fn from(inputs: BlockInputs) -> Self {
         let (
             prev_block_header,
@@ -107,7 +109,7 @@ impl From<BlockInputs> for GetBlockInputsResponse {
             unauthenticated_note_proofs,
         ) = inputs.into_parts();
 
-        GetBlockInputsResponse {
+        proto::block_producer_store::BlockInputs {
             latest_block_header: Some(prev_block_header.into()),
             account_witnesses: account_witnesses
                 .into_iter()
@@ -123,19 +125,19 @@ impl From<BlockInputs> for GetBlockInputsResponse {
             partial_block_chain: partial_block_chain.to_bytes(),
             unauthenticated_note_proofs: unauthenticated_note_proofs
                 .iter()
-                .map(NoteInclusionInBlockProof::from)
+                .map(proto::note::NoteInclusionInBlockProof::from)
                 .collect(),
         }
     }
 }
 
-impl TryFrom<GetBlockInputsResponse> for BlockInputs {
+impl TryFrom<proto::block_producer_store::BlockInputs> for BlockInputs {
     type Error = ConversionError;
 
-    fn try_from(response: GetBlockInputsResponse) -> Result<Self, Self::Error> {
+    fn try_from(response: proto::block_producer_store::BlockInputs) -> Result<Self, Self::Error> {
         let latest_block_header: BlockHeader = response
             .latest_block_header
-            .ok_or(proto::BlockHeader::missing_field("block_header"))?
+            .ok_or(proto::blockchain::BlockHeader::missing_field("block_header"))?
             .try_into()?;
 
         let account_witnesses = response
@@ -174,5 +176,34 @@ impl TryFrom<GetBlockInputsResponse> for BlockInputs {
             nullifier_witnesses,
             unauthenticated_note_proofs,
         ))
+    }
+}
+
+// FEE PARAMETERS
+// ================================================================================================
+
+impl TryFrom<proto::blockchain::FeeParameters> for FeeParameters {
+    type Error = ConversionError;
+    fn try_from(fee_params: proto::blockchain::FeeParameters) -> Result<Self, Self::Error> {
+        let native_asset_id = fee_params.native_asset_id.map(AccountId::try_from).ok_or(
+            proto::blockchain::FeeParameters::missing_field(stringify!(native_asset_id)),
+        )??;
+        let fee_params = FeeParameters::new(native_asset_id, fee_params.verification_base_fee)?;
+        Ok(fee_params)
+    }
+}
+
+impl From<FeeParameters> for proto::blockchain::FeeParameters {
+    fn from(value: FeeParameters) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<&FeeParameters> for proto::blockchain::FeeParameters {
+    fn from(value: &FeeParameters) -> Self {
+        Self {
+            native_asset_id: Some(value.native_asset_id().into()),
+            verification_base_fee: value.verification_base_fee(),
+        }
     }
 }

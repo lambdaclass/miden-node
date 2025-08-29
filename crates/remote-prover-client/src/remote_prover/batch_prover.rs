@@ -1,22 +1,16 @@
-use alloc::{
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::time::Duration;
 
-use miden_objects::{
-    batch::{ProposedBatch, ProvenBatch},
-    transaction::{OutputNote, ProvenTransaction, TransactionHeader, TransactionId},
-    utils::{Deserializable, DeserializationError, Serializable},
-};
+use miden_objects::batch::{ProposedBatch, ProvenBatch};
+use miden_objects::transaction::{OutputNote, ProvenTransaction, TransactionHeader, TransactionId};
+use miden_objects::utils::{Deserializable, DeserializationError, Serializable};
 use tokio::sync::Mutex;
 
 use super::generated::api_client::ApiClient;
-use crate::{
-    RemoteProverClientError,
-    remote_prover::generated::{ProofType, ProvingRequest, ProvingResponse},
-};
+use crate::RemoteProverClientError;
+use crate::remote_prover::generated as proto;
 
 // REMOTE BATCH PROVER
 // ================================================================================================
@@ -229,19 +223,19 @@ impl RemoteBatchProver {
 // CONVERSIONS
 // ================================================================================================
 
-impl From<ProposedBatch> for ProvingRequest {
+impl From<ProposedBatch> for proto::ProofRequest {
     fn from(proposed_batch: ProposedBatch) -> Self {
-        ProvingRequest {
-            proof_type: ProofType::Batch.into(),
+        proto::ProofRequest {
+            proof_type: proto::ProofType::Batch.into(),
             payload: proposed_batch.to_bytes(),
         }
     }
 }
 
-impl TryFrom<ProvingResponse> for ProvenBatch {
+impl TryFrom<proto::Proof> for ProvenBatch {
     type Error = DeserializationError;
 
-    fn try_from(response: ProvingResponse) -> Result<Self, Self::Error> {
+    fn try_from(response: proto::Proof) -> Result<Self, Self::Error> {
         ProvenBatch::read_from_bytes(&response.payload)
     }
 }

@@ -1,43 +1,62 @@
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, hash_map::Entry},
-    num::NonZeroUsize,
-};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::num::NonZeroUsize;
 
-use account::{AccountState, NetworkAccountUpdate};
+use account::{AccountState, InflightNetworkNote, NetworkAccountUpdate};
 use anyhow::Context;
-use miden_node_proto::domain::{
-    account::NetworkAccountPrefix, mempool::MempoolEvent, note::NetworkNote,
-};
+use miden_node_proto::domain::account::NetworkAccountPrefix;
+use miden_node_proto::domain::mempool::MempoolEvent;
+use miden_node_proto::domain::note::{NetworkNote, SingleTargetNetworkNote};
 use miden_node_utils::tracing::OpenTelemetrySpanExt;
-use miden_objects::{
-    account::{Account, delta::AccountUpdateDetails},
-    note::Nullifier,
-    transaction::TransactionId,
-};
+use miden_objects::account::Account;
+use miden_objects::account::delta::AccountUpdateDetails;
+use miden_objects::block::{BlockHeader, BlockNumber};
+use miden_objects::note::{Note, Nullifier};
+use miden_objects::transaction::{PartialBlockchain, TransactionId};
 use tracing::instrument;
 
-use crate::{
-    COMPONENT,
-    store::{StoreClient, StoreError},
-};
+use crate::COMPONENT;
+use crate::store::{StoreClient, StoreError};
 
 mod account;
+
+// CONSTANTS
+// =================================================================================================
+
+/// The maximum number of blocks to keep in memory while tracking the chain tip.
+const MAX_BLOCK_COUNT: usize = 4;
 
 /// A candidate network transaction.
 ///
 /// Contains the data pertaining to a specific network account which can be used to build a network
 /// transaction.
+#[derive(Clone)]
 pub struct TransactionCandidate {
     /// The current inflight state of the account.
     pub account: Account,
+
     /// A set of notes addressed to this network account.
-    pub notes: Vec<NetworkNote>,
+    pub notes: Vec<InflightNetworkNote>,
+
+    /// The latest locally committed block header.
+    ///
+    /// This should be used as the reference block during transaction execution.
+    pub chain_tip_header: BlockHeader,
+
+    /// The chain MMR, which lags behind the tip by one block.
+    pub chain_mmr: PartialBlockchain,
 }
 
 /// Holds the state of the network transaction builder.
 ///
 /// It tracks inflight transactions, and their impact on network-related state.
 pub struct State {
+    /// The latest committed block header.
+    chain_tip_header: BlockHeader,
+
+    /// The chain MMR, which lags behind the tip by one block.
+    chain_mmr: PartialBlockchain,
+
     /// Tracks all network accounts with inflight state.
     ///
     /// This is network account deltas, network notes and their nullifiers.
@@ -70,10 +89,23 @@ pub struct State {
 }
 
 impl State {
+    /// Maximum number of attempts to execute a network note.
+    const MAX_NOTE_ATTEMPTS: usize = 30;
+
     /// Load's all available network notes from the store, along with the required account states.
     #[instrument(target = COMPONENT, name = "ntx.state.load", skip_all)]
     pub async fn load(store: StoreClient) -> Result<Self, StoreError> {
+        let (chain_tip_header, chain_mmr) = store
+            .get_latest_blockchain_data_with_retry()
+            .await?
+            .expect("store should contain a latest block");
+
+        let chain_mmr = PartialBlockchain::new(chain_mmr, [])
+            .expect("PartialBlockchain should build from latest partial MMR");
+
         let mut state = Self {
+            chain_tip_header,
+            chain_mmr,
             store,
             accounts: HashMap::default(),
             queue: VecDeque::default(),
@@ -84,13 +116,14 @@ impl State {
 
         let notes = state.store.get_unconsumed_network_notes().await?;
         for note in notes {
-            let prefix = note.account_prefix();
-
-            // Ignore notes which don't target an existing account.
-            let Some(account) = state.fetch_account(prefix).await? else {
-                continue;
-            };
-            account.add_note(note);
+            // Currently only support single target network notes in NTB.
+            if let NetworkNote::SingleTarget(note) = note {
+                let prefix = note.account_prefix();
+                // Ignore notes which don't target an existing account.
+                if let Some(account) = state.fetch_account(prefix).await? {
+                    account.add_note(note);
+                }
+            }
         }
         state.inject_telemetry();
 
@@ -124,10 +157,12 @@ impl State {
                 continue;
             }
 
-            let account = self.accounts.get(&candidate).expect("queue account must be tracked");
+            let account = self.accounts.get_mut(&candidate).expect("queue account must be tracked");
+
+            // Remove notes that have failed too many times.
+            account.drop_failing_notes(Self::MAX_NOTE_ATTEMPTS);
 
             // Skip empty accounts, and prune them.
-            //
             // This is how we keep the number of accounts bounded.
             if account.is_empty() {
                 // We don't need to prune the inflight transactions because if the account is empty,
@@ -138,7 +173,12 @@ impl State {
                 continue;
             }
 
-            let notes = account.notes().take(limit.get()).cloned().collect::<Vec<_>>();
+            // Select notes from the account that can be consumed or are ready for a retry.
+            let notes = account
+                .available_notes(&self.chain_tip_header.block_num())
+                .take(limit.get())
+                .cloned()
+                .collect::<Vec<_>>();
 
             // Skip accounts with no available notes.
             if notes.is_empty() {
@@ -146,18 +186,66 @@ impl State {
             }
 
             self.in_progress.insert(candidate);
-            return TransactionCandidate { account: account.latest_account(), notes }.into();
+            return TransactionCandidate {
+                account: account.latest_account(),
+                notes,
+                chain_tip_header: self.chain_tip_header.clone(),
+                chain_mmr: self.chain_mmr.clone(),
+            }
+            .into();
         }
         self.inject_telemetry();
 
         None
     }
 
+    /// The latest block number the state knows of.
+    pub fn chain_tip(&self) -> BlockNumber {
+        self.chain_tip_header.block_num()
+    }
+
+    /// Updates the chain tip and MMR block count.
+    ///
+    /// Blocks in the MMR are pruned if the block count exceeds the maximum.
+    fn update_chain_tip(&mut self, tip: BlockHeader) {
+        // Update MMR which lags by one block.
+        self.chain_mmr.add_block(self.chain_tip_header.clone(), true);
+
+        // Set the new tip.
+        self.chain_tip_header = tip;
+
+        // Keep MMR pruned.
+        let pruned_block_height =
+            (self.chain_mmr.chain_length().as_usize().saturating_sub(MAX_BLOCK_COUNT)) as u32;
+        self.chain_mmr.prune_to(..pruned_block_height.into());
+    }
+
+    /// Marks notes of a previously selected candidate as failed.
+    ///
+    /// Does not remove the candidate from the in-progress pool.
+    #[instrument(target = COMPONENT, name = "ntx.state.notes_failed", skip_all)]
+    pub fn notes_failed(
+        &mut self,
+        candidate: NetworkAccountPrefix,
+        notes: &[Note],
+        block_num: BlockNumber,
+    ) {
+        if let Some(account) = self.accounts.get_mut(&candidate) {
+            let nullifiers = notes.iter().map(Note::nullifier).collect::<Vec<_>>();
+            account.fail_notes(nullifiers.as_slice(), block_num);
+        } else {
+            tracing::error!(account.prefix=%candidate, "failed network notes have no local account state");
+        }
+    }
+
     /// Marks a previously selected candidate account as failed, allowing it to be available for
     /// selection again.
+    ///
+    /// All notes in the candidate will be marked as failed.
     #[instrument(target = COMPONENT, name = "ntx.state.candidate_failed", skip_all)]
     pub fn candidate_failed(&mut self, candidate: NetworkAccountPrefix) {
         self.in_progress.remove(&candidate);
+
         self.inject_telemetry();
     }
 
@@ -176,9 +264,23 @@ impl State {
                 network_notes,
                 account_delta,
             } => {
+                let network_notes = network_notes
+                    .into_iter()
+                    .filter_map(|note| match note {
+                        NetworkNote::SingleTarget(note) => Some(note),
+                        NetworkNote::MultiTarget(_) => None,
+                    })
+                    .collect::<Vec<_>>();
                 self.add_transaction(id, nullifiers, network_notes, account_delta).await?;
             },
-            MempoolEvent::BlockCommitted { header: _, txs } => {
+            MempoolEvent::BlockCommitted { header, txs } => {
+                anyhow::ensure!(
+                    header.prev_block_commitment() == self.chain_tip_header.commitment(),
+                    "New block's parent commitment {} does not match local chain tip {}",
+                    header.prev_block_commitment(),
+                    self.chain_tip_header.commitment()
+                );
+                self.update_chain_tip(header);
                 for tx in txs {
                     self.commit_transaction(tx);
                 }
@@ -206,7 +308,7 @@ impl State {
         &mut self,
         id: TransactionId,
         nullifiers: Vec<Nullifier>,
-        network_notes: Vec<NetworkNote>,
+        network_notes: Vec<SingleTargetNetworkNote>,
         account_delta: Option<AccountUpdateDetails>,
     ) -> anyhow::Result<()> {
         // Skip transactions we already know about.
@@ -242,13 +344,10 @@ impl State {
         }
         for note in network_notes {
             tx_impact.notes.insert(note.nullifier());
-            self.nullifier_idx.insert(note.nullifier(), note.account_prefix());
+            let prefix = note.account_prefix();
+            self.nullifier_idx.insert(note.nullifier(), prefix);
             // Skip notes which target a non-existent network account.
-            if let Some(account) = self
-                .fetch_account(note.account_prefix())
-                .await
-                .context("failed to load account")?
-            {
+            if let Some(account) = self.fetch_account(prefix).await? {
                 account.add_note(note);
             }
         }

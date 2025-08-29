@@ -1,19 +1,35 @@
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
+use std::time::Duration;
 
-use miden_node_proto::generated::{
-    requests::GetBlockHeaderByNumberRequest, responses::GetBlockHeaderByNumberResponse,
-    rpc::api_client::ApiClient as ProtoClient,
+use http::header::{ACCEPT, CONTENT_TYPE};
+use http::{HeaderMap, HeaderValue};
+use miden_node_proto::clients::{Builder, Rpc as RpcClientMarker, RpcClient};
+use miden_node_proto::generated::rpc::api_client::ApiClient as ProtoClient;
+use miden_node_proto::generated::{self as proto};
+use miden_node_store::Store;
+use miden_node_store::genesis::config::GenesisConfig;
+use miden_node_utils::fee::test_fee;
+use miden_objects::account::delta::AccountUpdateDetails;
+use miden_objects::account::{
+    AccountDelta,
+    AccountId,
+    AccountIdVersion,
+    AccountStorageDelta,
+    AccountStorageMode,
+    AccountType,
+    AccountVaultDelta,
 };
-use miden_node_store::{GenesisState, Store};
+use miden_objects::transaction::ProvenTransactionBuilder;
+use miden_objects::utils::Serializable;
+use miden_objects::vm::ExecutionProof;
+use miden_objects::{Felt, Word};
 use tempfile::TempDir;
-use tokio::{
-    net::TcpListener,
-    runtime::{self, Runtime},
-    task,
-};
+use tokio::net::TcpListener;
+use tokio::runtime::{self, Runtime};
+use tokio::task;
 use url::Url;
 
-use crate::{ApiClient, Rpc};
+use crate::Rpc;
 
 #[tokio::test]
 async fn rpc_server_accepts_requests_without_accept_header() {
@@ -29,7 +45,7 @@ async fn rpc_server_accepts_requests_without_accept_header() {
     };
 
     // Send any request to the RPC.
-    let request = GetBlockHeaderByNumberRequest {
+    let request = proto::shared::BlockHeaderByNumberRequest {
         block_num: Some(0),
         include_mmr_proof: None,
     };
@@ -67,9 +83,16 @@ async fn rpc_server_rejects_requests_with_accept_header_invalid_version() {
 
         // Recreate the RPC client with an invalid version.
         let url = rpc_addr.to_string();
+        // SAFETY: The rpc_addr is always valid as it is created from a `SocketAddr`.
         let url = Url::parse(format!("http://{}", &url).as_str()).unwrap();
-        let mut rpc_client =
-            ApiClient::connect(&url, Duration::from_secs(10), Some(version)).await.unwrap();
+        let mut rpc_client: RpcClient = Builder::new(url)
+            .without_tls()
+            .with_timeout(Duration::from_secs(10))
+            .with_metadata_version(version.to_string())
+            .without_metadata_genesis()
+            .connect::<RpcClientMarker>()
+            .await
+            .unwrap();
 
         // Send any request to the RPC.
         let response = send_request(&mut rpc_client).await;
@@ -77,14 +100,7 @@ async fn rpc_server_rejects_requests_with_accept_header_invalid_version() {
         // Assert the server does not reject our request on the basis of missing accept header.
         assert!(response.is_err());
         assert_eq!(response.as_ref().err().unwrap().code(), tonic::Code::InvalidArgument);
-        assert!(
-            response
-                .as_ref()
-                .err()
-                .unwrap()
-                .message()
-                .contains("Client / server version mismatch"),
-        );
+        assert!(response.as_ref().err().unwrap().message().contains("server does not support"),);
 
         // Shutdown to avoid runtime drop error.
         store_runtime.shutdown_background();
@@ -128,6 +144,7 @@ async fn rpc_startup_is_robust_to_network_failures() {
             ntx_builder_listener,
             block_producer_listener,
             data_directory: data_directory.path().to_path_buf(),
+            grpc_timeout: Duration::from_secs(10),
         }
         .serve()
         .await
@@ -137,11 +154,118 @@ async fn rpc_startup_is_robust_to_network_failures() {
     assert_eq!(response.unwrap().into_inner().block_header.unwrap().block_num, 0);
 }
 
+#[tokio::test]
+async fn rpc_server_has_web_support() {
+    // Start server
+    let (_, rpc_addr, store_addr) = start_rpc().await;
+    let (store_runtime, _data_directory) = start_store(store_addr).await;
+
+    // Send a status request
+    let client = reqwest::Client::new();
+
+    let mut headers = HeaderMap::new();
+    let accept_header = concat!("application/vnd.miden; version=", env!("CARGO_PKG_VERSION"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc-web+proto"));
+    headers.insert(ACCEPT, HeaderValue::from_static(accept_header));
+
+    // An empty message with header format:
+    //   - A byte indicating uncompressed (0)
+    //   - A u32 indicating the data length (0)
+    //
+    // Originally described here:
+    // https://github.com/hyperium/tonic/issues/1040#issuecomment-1191832200
+    let mut message = Vec::new();
+    message.push(0);
+    message.extend_from_slice(&0u32.to_be_bytes());
+
+    let response = client
+        .post(format!("http://{rpc_addr}/rpc.Api/Status"))
+        .headers(headers)
+        .body(message)
+        .send()
+        .await
+        .unwrap();
+    let headers = response.headers();
+
+    // CORS headers are usually set when `tonic_web` is enabled.
+    //
+    // This was deduced by manually checking, and isn't formally described
+    // in any documentation.
+    assert!(headers.get("access-control-allow-credentials").is_some());
+    assert!(headers.get("access-control-expose-headers").is_some());
+    assert!(headers.get("vary").is_some());
+    store_runtime.shutdown_background();
+}
+
+#[tokio::test]
+async fn rpc_server_rejects_proven_transactions_with_invalid_commitment() {
+    // Start the RPC.
+    let (_, rpc_addr, store_addr) = start_rpc().await;
+    let (store_runtime, _data_directory) = start_store(store_addr).await;
+
+    // Override the client so that the ACCEPT header is not set.
+    let mut rpc_client = {
+        let endpoint = tonic::transport::Endpoint::try_from(format!("http://{rpc_addr}")).unwrap();
+
+        ProtoClient::connect(endpoint).await.unwrap()
+    };
+
+    let account_id = AccountId::dummy(
+        [0; 15],
+        AccountIdVersion::Version0,
+        AccountType::RegularAccountImmutableCode,
+        AccountStorageMode::Public,
+    );
+    // Send any request to the RPC.
+    let tx = ProvenTransactionBuilder::new(
+        account_id,
+        [8; 32].try_into().unwrap(),
+        [3; 32].try_into().unwrap(),
+        [22; 32].try_into().unwrap(), // delta commitment
+        0.into(),
+        Word::default(),
+        test_fee(),
+        u32::MAX.into(),
+        ExecutionProof::new_dummy(),
+    )
+    .account_update_details(AccountUpdateDetails::Delta(
+        AccountDelta::new(
+            account_id,
+            AccountStorageDelta::new(),
+            AccountVaultDelta::default(),
+            Felt::default(),
+        )
+        .unwrap(),
+    ))
+    .build()
+    .unwrap();
+    let request = proto::transaction::ProvenTransaction { transaction: tx.to_bytes() };
+
+    let response = rpc_client.submit_proven_transaction(request).await;
+
+    // Assert that the server rejected our request.
+    assert!(response.is_err());
+
+    // Assert that the error is due to the invalid account delta commitment.
+    assert!(
+        response
+            .as_ref()
+            .err()
+            .unwrap()
+            .message()
+            .contains("Account delta commitment does not match the actual account delta"),
+    );
+
+    // Shutdown to avoid runtime drop error.
+    store_runtime.shutdown_background();
+}
+
 /// Sends an arbitrary / irrelevant request to the RPC.
 async fn send_request(
-    rpc_client: &mut ApiClient,
-) -> std::result::Result<tonic::Response<GetBlockHeaderByNumberResponse>, tonic::Status> {
-    let request = GetBlockHeaderByNumberRequest {
+    rpc_client: &mut RpcClient,
+) -> std::result::Result<tonic::Response<proto::shared::BlockHeaderByNumberResponse>, tonic::Status>
+{
+    let request = proto::shared::BlockHeaderByNumberRequest {
         block_num: Some(0),
         include_mmr_proof: None,
     };
@@ -150,7 +274,7 @@ async fn send_request(
 
 /// Binds a socket on an available port, runs the RPC server on it, and
 /// returns a client to talk to the server, along with the socket address.
-async fn start_rpc() -> (ApiClient, std::net::SocketAddr, std::net::SocketAddr) {
+async fn start_rpc() -> (RpcClient, std::net::SocketAddr, std::net::SocketAddr) {
     let store_addr = {
         let store_listener =
             TcpListener::bind("127.0.0.1:0").await.expect("store should bind a port");
@@ -168,18 +292,31 @@ async fn start_rpc() -> (ApiClient, std::net::SocketAddr, std::net::SocketAddr) 
     let rpc_listener = TcpListener::bind("127.0.0.1:0").await.expect("Failed to bind rpc");
     let rpc_addr = rpc_listener.local_addr().expect("Failed to get rpc address");
     task::spawn(async move {
+        // SAFETY: The store_addr is always valid as it is created from a `SocketAddr`.
+        let store_url = Url::parse(&format!("http://{store_addr}")).unwrap();
+        // SAFETY: The block_producer_addr is always valid as it is created from a `SocketAddr`.
+        let block_producer_url = Url::parse(&format!("http://{block_producer_addr}")).unwrap();
         Rpc {
             listener: rpc_listener,
-            store: store_addr,
-            block_producer: Some(block_producer_addr),
+            store_url,
+            block_producer_url: Some(block_producer_url),
+            grpc_timeout: Duration::from_secs(30),
         }
         .serve()
         .await
         .expect("Failed to start serving store");
     });
     let url = rpc_addr.to_string();
+    // SAFETY: The rpc_addr is always valid as it is created from a `SocketAddr`.
     let url = Url::parse(format!("http://{}", &url).as_str()).unwrap();
-    let rpc_client = ApiClient::connect(&url, Duration::from_secs(10), None).await.unwrap();
+    let rpc_client: RpcClient = Builder::new(url)
+        .without_tls()
+        .with_timeout(Duration::from_secs(10))
+        .without_metadata_version()
+        .without_metadata_genesis()
+        .connect::<RpcClientMarker>()
+        .await
+        .expect("Failed to build client");
 
     (rpc_client, rpc_addr, store_addr)
 }
@@ -187,7 +324,8 @@ async fn start_rpc() -> (ApiClient, std::net::SocketAddr, std::net::SocketAddr) 
 async fn start_store(store_addr: SocketAddr) -> (Runtime, TempDir) {
     // Start the store.
     let data_directory = tempfile::tempdir().expect("tempdir should be created");
-    let genesis_state = GenesisState::new(vec![], 1, 1);
+
+    let (genesis_state, _) = GenesisConfig::default().into_state().unwrap();
     Store::bootstrap(genesis_state.clone(), data_directory.path()).expect("store should bootstrap");
     let dir = data_directory.path().to_path_buf();
     let rpc_listener = TcpListener::bind(store_addr).await.expect("store should bind a port");
@@ -207,6 +345,7 @@ async fn start_store(store_addr: SocketAddr) -> (Runtime, TempDir) {
             ntx_builder_listener,
             block_producer_listener,
             data_directory: dir,
+            grpc_timeout: Duration::from_secs(30),
         }
         .serve()
         .await

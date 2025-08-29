@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use clap::Parser;
-use miden_remote_prover::{COMPONENT, api::ProofType};
+use miden_remote_prover::COMPONENT;
+use miden_remote_prover::api::ProofType;
 use proxy::StartProxy;
 use tracing::instrument;
 use update_workers::{AddWorkers, RemoveWorkers, UpdateWorkers};
@@ -40,11 +41,6 @@ pub(crate) struct ProxyConfig {
     /// Port of the proxy.
     #[arg(long, default_value = "8082", env = "MRP_PORT")]
     pub(crate) port: u16,
-    /// Status update interval in seconds.
-    ///
-    /// How often the proxy status service updates its status information.
-    #[arg(long, default_value = "10s", env = "MRP_STATUS_UPDATE_INTERVAL", value_parser = humantime::parse_duration)]
-    pub(crate) status_update_interval: Duration,
     /// Maximum time allowed for a request to complete. Once exceeded, the request is
     /// aborted.
     #[arg(long, default_value = "100s", env = "MRP_TIMEOUT", value_parser = humantime::parse_duration)]
@@ -60,12 +56,6 @@ pub(crate) struct ProxyConfig {
     /// will be able to connect to the proxy.
     #[arg(long, default_value = "transaction", env = "MRP_PROOF_TYPE")]
     pub(crate) proof_type: ProofType,
-    /// Status port.
-    ///
-    /// Port used to get the status of the proxy. It is used to get the list of workers and their
-    /// statuses, as well as the supported prover type and version of the proxy.
-    #[arg(long, default_value = "8084", env = "MRP_STATUS_PORT")]
-    pub(crate) status_port: u16,
     /// Grace period before starting the final step of the graceful shutdown after
     /// signaling shutdown.
     #[arg(long, default_value = "20s", env = "MRP_GRACE_PERIOD", value_parser = humantime::parse_duration)]
@@ -117,7 +107,7 @@ pub enum Command {
 /// CLI entry point
 impl Cli {
     #[instrument(target = COMPONENT, name = "cli.execute", skip_all, ret(level = "info"), err)]
-    pub async fn execute(&self) -> Result<(), String> {
+    pub async fn execute(&self) -> anyhow::Result<()> {
         match &self.action {
             // For the `StartWorker` command, we need to create a new runtime and run the worker
             Command::StartWorker(worker_init) => worker_init.execute().await,

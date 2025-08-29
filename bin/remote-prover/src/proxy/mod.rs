@@ -1,24 +1,32 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, LazyLock},
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use metrics::{
-    QUEUE_LATENCY, QUEUE_SIZE, RATE_LIMIT_VIOLATIONS, RATE_LIMITED_REQUESTS, REQUEST_COUNT,
-    REQUEST_FAILURE_COUNT, REQUEST_LATENCY, REQUEST_RETRIES, WORKER_BUSY, WORKER_COUNT,
+    QUEUE_LATENCY,
+    QUEUE_SIZE,
+    RATE_LIMIT_VIOLATIONS,
+    RATE_LIMITED_REQUESTS,
+    REQUEST_COUNT,
+    REQUEST_FAILURE_COUNT,
+    REQUEST_LATENCY,
+    REQUEST_RETRIES,
+    WORKER_BUSY,
+    WORKER_COUNT,
     WORKER_REQUEST_COUNT,
 };
-use miden_remote_prover::{COMPONENT, api::ProofType, error::RemoteProverError};
-use pingora::{
-    http::ResponseHeader,
-    prelude::*,
-    protocols::Digest,
-    upstreams::peer::{ALPN, Peer},
-};
-use pingora_core::{Result, upstreams::peer::HttpPeer};
+use miden_remote_prover::COMPONENT;
+use miden_remote_prover::api::ProofType;
+use miden_remote_prover::error::RemoteProverError;
+use miden_remote_prover::generated::remote_prover::{ProxyStatus, ProxyWorkerStatus};
+use pingora::http::ResponseHeader;
+use pingora::prelude::*;
+use pingora::protocols::Digest;
+use pingora::upstreams::peer::{ALPN, Peer};
+use pingora_core::Result;
+use pingora_core::upstreams::peer::HttpPeer;
 use pingora_limits::rate::Rate;
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
 use tokio::sync::RwLock;
@@ -26,22 +34,24 @@ use tracing::{Span, debug, error, info, info_span, warn};
 use uuid::Uuid;
 use worker::Worker;
 
-use crate::{
-    commands::{
-        ProxyConfig,
-        update_workers::{Action, UpdateWorkers},
-    },
-    utils::{
-        create_queue_full_response, create_response_with_error_message,
-        create_too_many_requests_response,
-    },
+use crate::commands::ProxyConfig;
+use crate::commands::update_workers::{Action, UpdateWorkers};
+use crate::utils::{
+    create_queue_full_response,
+    create_response_with_error_message,
+    create_too_many_requests_response,
+    write_grpc_response_to_session,
 };
 
 mod health_check;
 pub mod metrics;
-pub(crate) mod status;
 pub(crate) mod update_workers;
 pub(crate) mod worker;
+
+// CONSTANTS
+// ================================================================================================
+
+const PROXY_STATUS_PATH: &str = "/remote_prover.ProxyStatusApi/Status";
 
 // LOAD BALANCER STATE
 // ================================================================================================
@@ -58,6 +68,8 @@ pub struct LoadBalancerState {
     available_workers_polling_interval: Duration,
     health_check_interval: Duration,
     supported_proof_type: ProofType,
+    status_cache_sender: tokio::sync::watch::Sender<ProxyStatus>,
+    status_cache_receiver: tokio::sync::watch::Receiver<ProxyStatus>,
 }
 
 impl LoadBalancerState {
@@ -92,8 +104,21 @@ impl LoadBalancerState {
         RATE_LIMITED_REQUESTS.reset();
         REQUEST_RETRIES.reset();
 
+        let workers = Arc::new(RwLock::new(workers));
+        let supported_proof_type = config.proof_type;
+
+        // Build initial status for the cache
+        let initial_status = {
+            let workers_guard = workers.read().await;
+            build_proxy_status_response(&workers_guard, supported_proof_type)
+        };
+
+        // Create the status cache channel
+        let (status_cache_sender, status_cache_receiver) =
+            tokio::sync::watch::channel(initial_status);
+
         Ok(Self {
-            workers: Arc::new(RwLock::new(workers)),
+            workers,
             timeout: total_timeout,
             connection_timeout,
             max_queue_items: config.max_queue_items,
@@ -101,7 +126,9 @@ impl LoadBalancerState {
             max_req_per_sec: config.max_req_per_sec,
             available_workers_polling_interval: config.available_workers_polling_interval,
             health_check_interval: config.health_check_interval,
-            supported_proof_type: config.proof_type,
+            supported_proof_type,
+            status_cache_sender,
+            status_cache_receiver,
         })
     }
 
@@ -193,7 +220,22 @@ impl LoadBalancerState {
     pub async fn num_busy_workers(&self) -> usize {
         self.workers.read().await.iter().filter(|w| !w.is_available()).count()
     }
+
+    /// Get the cached status response
+    pub fn get_cached_status(&self) -> ProxyStatus {
+        self.status_cache_receiver.borrow().clone()
+    }
+
+    /// Update the status cache with current worker status
+    pub async fn update_status_cache(&self) {
+        let workers = self.workers.read().await;
+        let new_status = build_proxy_status_response(&workers, self.supported_proof_type);
+        self.status_cache_sender.send(new_status).expect("Failed to send new status");
+    }
 }
+
+// UTILS
+// ================================================================================================
 
 /// Rate limiter
 static RATE_LIMITER: LazyLock<Rate> = LazyLock::new(|| Rate::new(Duration::from_secs(1)));
@@ -297,9 +339,9 @@ impl RequestContext {
 // LOAD BALANCER
 // ================================================================================================
 
-/// Wrapper around the load balancer that implements the `ProxyHttp` trait
+/// Wrapper around the load balancer that implements the [`ProxyHttp`] trait
 ///
-/// This wrapper is used to implement the `ProxyHttp` trait for `Arc<LoadBalancer>`.
+/// This wrapper is used to implement the [`ProxyHttp`] trait for [`Arc<LoadBalancer>`].
 /// This is necessary because we want to share the load balancer between the proxy server and the
 /// health check background service.
 #[derive(Debug)]
@@ -308,21 +350,21 @@ pub struct LoadBalancer(pub Arc<LoadBalancerState>);
 /// Implements load-balancing of incoming requests across a pool of workers.
 ///
 /// At the backend-level, a request lifecycle works as follows:
-/// - When a new requests arrives, [LoadBalancer::request_filter()] method is called. In this method
-///   we apply IP-based rate-limiting to the request and check if the request queue is full. In this
-///   method we also handle the special case update workers request.
-/// - Next, the [Self::upstream_peer()] method is called. We use it to figure out which worker will
-///   process the request. Inside `upstream_peer()`, we add the request to the queue of requests.
-///   Once the request gets to the front of the queue, we forward it to an available worker. This
-///   step is also in charge of setting the SNI, timeouts, and enabling HTTP/2. Finally, we
-///   establish a connection with the worker.
+/// - When a new requests arrives, [`LoadBalancer::request_filter()`] method is called. In this
+///   method we apply IP-based rate-limiting to the request and check if the request queue is full.
+///   In this method we also handle the special case update workers request.
+/// - Next, the [`Self::upstream_peer()`] method is called. We use it to figure out which worker
+///   will process the request. Inside `upstream_peer()`, we add the request to the queue of
+///   requests. Once the request gets to the front of the queue, we forward it to an available
+///   worker. This step is also in charge of setting the SNI, timeouts, and enabling HTTP/2.
+///   Finally, we establish a connection with the worker.
 /// - Before sending the request to the upstream server and if the connection succeed, the
-///   [Self::upstream_request_filter()] method is called. In this method, we ensure that the correct
-///   headers are forwarded for gRPC requests.
-/// - If the connection fails, the [Self::fail_to_connect()] method is called. In this method, we
-///   retry the request [self.max_retries_per_request] times.
+///   [`Self::upstream_request_filter()`] method is called. In this method, we ensure that the
+///   correct headers are forwarded for gRPC requests.
+/// - If the connection fails, the [`Self::fail_to_connect()`] method is called. In this method, we
+///   retry the request [`self.max_retries_per_request`] times.
 /// - Once the worker processes the request (either successfully or with a failure),
-///   [Self::logging()] method is called. In this method, we log the request lifecycle and set the
+///   [`Self::logging()`] method is called. In this method, we log the request lifecycle and set the
 ///   worker as available.
 #[async_trait]
 impl ProxyHttp for LoadBalancer {
@@ -332,7 +374,10 @@ impl ProxyHttp for LoadBalancer {
     }
 
     /// Decide whether to filter the request or not. Also, handle the special case of the update
-    /// workers request.
+    /// workers request or the proxy status request.
+    ///
+    /// The proxy status request is handled separately because it is used by the health check
+    /// service to check the status of the proxy and returns immediate response.
     ///
     /// Here we apply IP-based rate-limiting to the request. We also check if the queue is full.
     ///
@@ -350,11 +395,21 @@ impl ProxyHttp for LoadBalancer {
                     session.as_downstream_mut(),
                     "No socket address".to_string(),
                 )
-                .await;
+                .await
+                .map(|_| true);
             },
         };
 
-        info!("Client address: {:?}", client_addr);
+        Span::current().record("client_addr", client_addr.clone());
+
+        let path = session.downstream_session.req_header().uri.path();
+        Span::current().record("path", path);
+
+        // Check if the request is a grpc proxy status request by checking the path
+        if path == PROXY_STATUS_PATH {
+            let status = self.0.get_cached_status();
+            return write_grpc_response_to_session(session, status).await.map(|_| true);
+        }
 
         // Increment the request count
         REQUEST_COUNT.inc();
@@ -373,7 +428,9 @@ impl ProxyHttp for LoadBalancer {
                 RATE_LIMIT_VIOLATIONS.inc();
             }
 
-            return create_too_many_requests_response(session, self.0.max_req_per_sec).await;
+            return create_too_many_requests_response(session, self.0.max_req_per_sec)
+                .await
+                .map(|_| true);
         }
 
         let queue_len = QUEUE.len().await;
@@ -383,20 +440,20 @@ impl ProxyHttp for LoadBalancer {
 
         // Check if the queue is full
         if queue_len >= self.0.max_queue_items {
-            return create_queue_full_response(session).await;
+            return create_queue_full_response(session).await.map(|_| true);
         }
 
         Ok(false)
     }
 
-    /// Returns [HttpPeer] corresponding to the worker that will handle the current request.
+    /// Returns [`HttpPeer`] corresponding to the worker that will handle the current request.
     ///
     /// Here we enqueue the request and wait for it to be at the front of the queue and a worker
     /// becomes available, then we dequeue the request and process it. We then set the SNI,
     /// timeouts, and enable HTTP/2.
     ///
     /// Note that the request will be assigned a worker here, and the worker will be removed from
-    /// the list of available workers once it reaches the [Self::logging] method.
+    /// the list of available workers once it reaches the [`Self::logging`] method.
     #[tracing::instrument(name = "proxy.upstream_peer", parent = &ctx.parent_span, skip(_session))]
     async fn upstream_peer(
         &self,
@@ -455,7 +512,7 @@ impl ProxyHttp for LoadBalancer {
     ///
     /// Here we ensure that the correct headers are forwarded for gRPC requests.
     ///
-    /// This method is called right after [Self::upstream_peer()] returns a [HttpPeer] and a
+    /// This method is called right after [`Self::upstream_peer()`] returns a [`HttpPeer`] and a
     /// connection is established with the worker.
     #[tracing::instrument(name = "proxy.upstream_request_filter", parent = &_ctx.parent_span, skip(_session))]
     async fn upstream_request_filter(
@@ -468,11 +525,11 @@ impl ProxyHttp for LoadBalancer {
         Self::CTX: Send + Sync,
     {
         // Check if it's a gRPC request
-        if let Some(content_type) = upstream_request.headers.get("content-type") {
-            if content_type == "application/grpc" {
-                // Ensure the correct host and gRPC headers are forwarded
-                upstream_request.insert_header("content-type", "application/grpc")?;
-            }
+        if let Some(content_type) = upstream_request.headers.get("content-type")
+            && content_type == "application/grpc"
+        {
+            // Ensure the correct host and gRPC headers are forwarded
+            upstream_request.insert_header("content-type", "application/grpc")?;
         }
 
         Ok(())
@@ -665,5 +722,19 @@ impl ProxyHttp for ProxyHttpDefaultImpl {
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         unimplemented!("This is a dummy implementation, should not be called")
+    }
+}
+
+// HELPERS
+// ================================================================================================
+
+/// Builds a `ProxyStatusResponse` from a list of workers and a supported proof type.
+fn build_proxy_status_response(workers: &[Worker], supported_proof_type: ProofType) -> ProxyStatus {
+    let worker_statuses: Vec<ProxyWorkerStatus> =
+        workers.iter().map(ProxyWorkerStatus::from).collect();
+    ProxyStatus {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        supported_proof_type: supported_proof_type.into(),
+        workers: worker_statuses,
     }
 }

@@ -1,15 +1,18 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use batch_graph::BatchGraph;
 use graph::GraphError;
 use inflight_state::InflightState;
 use miden_node_proto::domain::mempool::MempoolEvent;
 use miden_node_utils::tracing::OpenTelemetrySpanExt;
+use miden_objects::batch::{BatchId, ProvenBatch};
+use miden_objects::block::{BlockHeader, BlockNumber};
+use miden_objects::transaction::TransactionId;
 use miden_objects::{
-    MAX_ACCOUNTS_PER_BATCH, MAX_INPUT_NOTES_PER_BATCH, MAX_OUTPUT_NOTES_PER_BATCH,
-    batch::{BatchId, ProvenBatch},
-    block::{BlockHeader, BlockNumber},
-    transaction::TransactionId,
+    MAX_ACCOUNTS_PER_BATCH,
+    MAX_INPUT_NOTES_PER_BATCH,
+    MAX_OUTPUT_NOTES_PER_BATCH,
 };
 use subscription::SubscriptionProvider;
 use tokio::sync::{Mutex, MutexGuard, mpsc};
@@ -17,10 +20,9 @@ use tracing::{instrument, warn};
 use transaction_expiration::TransactionExpirations;
 use transaction_graph::TransactionGraph;
 
-use crate::{
-    COMPONENT, SERVER_MAX_BATCHES_PER_BLOCK, SERVER_MAX_TXS_PER_BATCH,
-    domain::transaction::AuthenticatedTransaction, errors::AddTransactionError,
-};
+use crate::domain::transaction::AuthenticatedTransaction;
+use crate::errors::AddTransactionError;
+use crate::{COMPONENT, DEFAULT_MAX_BATCHES_PER_BLOCK, DEFAULT_MAX_TXS_PER_BATCH};
 
 mod batch_graph;
 mod graph;
@@ -66,7 +68,7 @@ enum BudgetStatus {
 impl Default for BatchBudget {
     fn default() -> Self {
         Self {
-            transactions: SERVER_MAX_TXS_PER_BATCH,
+            transactions: DEFAULT_MAX_TXS_PER_BATCH,
             input_notes: MAX_INPUT_NOTES_PER_BATCH,
             output_notes: MAX_OUTPUT_NOTES_PER_BATCH,
             accounts: MAX_ACCOUNTS_PER_BATCH,
@@ -76,7 +78,7 @@ impl Default for BatchBudget {
 
 impl Default for BlockBudget {
     fn default() -> Self {
-        Self { batches: SERVER_MAX_BATCHES_PER_BLOCK }
+        Self { batches: DEFAULT_MAX_BATCHES_PER_BLOCK }
     }
 }
 

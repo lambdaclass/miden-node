@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
-use miden_objects::{Digest, transaction::TransactionId};
+use miden_objects::Word;
+use miden_objects::transaction::TransactionId;
 
 // IN-FLIGHT ACCOUNT STATE
 // ================================================================================================
@@ -11,7 +12,7 @@ pub struct InflightAccountState {
     /// This account's state transitions due to inflight transactions.
     ///
     /// Ordering is chronological from front (oldest) to back (newest).
-    states: VecDeque<(Digest, TransactionId)>,
+    states: VecDeque<(Word, TransactionId)>,
 
     /// The number of inflight states that have been committed.
     ///
@@ -23,7 +24,7 @@ pub struct InflightAccountState {
 impl InflightAccountState {
     /// Appends the new state, returning the previous state's transaction ID __IFF__ it is
     /// uncommitted.
-    pub fn insert(&mut self, state: Digest, tx: TransactionId) -> Option<TransactionId> {
+    pub fn insert(&mut self, state: Word, tx: TransactionId) -> Option<TransactionId> {
         let mut parent = self.states.back().map(|(_, tx)| tx).copied();
 
         // Only return uncommitted parent ID.
@@ -39,7 +40,7 @@ impl InflightAccountState {
     }
 
     /// The latest state of this account.
-    pub fn current_state(&self) -> Option<&Digest> {
+    pub fn current_state(&self) -> Option<&Word> {
         self.states.back().map(|(state, _)| state)
     }
 

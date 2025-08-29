@@ -3,60 +3,83 @@
 //! The [State] provides data access and modifications methods, its main purpose is to ensure that
 //! data is atomically written, and that reads are consistent.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Not,
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ops::Not;
+use std::path::Path;
+use std::sync::Arc;
 
-use miden_node_proto::{
-    AccountWitnessRecord,
-    domain::{
-        account::{AccountInfo, AccountProofRequest, StorageMapKeysProof},
-        batch::BatchInputs,
-    },
-    generated::responses::{AccountProofsResponse, AccountStateHeader, StorageSlotMapProof},
+use miden_node_proto::domain::account::{
+    AccountInfo,
+    AccountProofRequest,
+    NetworkAccountPrefix,
+    StorageMapKeysProof,
 };
-use miden_node_utils::{ErrorReport, formatting::format_array};
-use miden_objects::{
-    AccountError,
-    account::{AccountDelta, AccountHeader, AccountId, StorageSlot},
-    block::{
-        AccountTree, AccountWitness, BlockHeader, BlockInputs, BlockNumber, Blockchain,
-        NullifierTree, NullifierWitness, ProvenBlock,
-    },
-    crypto::{
-        hash::rpo::RpoDigest,
-        merkle::{Mmr, MmrDelta, MmrPeaks, MmrProof, PartialMmr, SmtProof},
-    },
-    note::{NoteDetails, NoteId, Nullifier},
-    transaction::{OutputNote, PartialBlockchain},
-    utils::Serializable,
+use miden_node_proto::domain::batch::BatchInputs;
+use miden_node_proto::{AccountWitnessRecord, generated as proto};
+use miden_node_utils::ErrorReport;
+use miden_node_utils::formatting::format_array;
+use miden_objects::account::{AccountHeader, AccountId, StorageSlot};
+use miden_objects::block::{
+    AccountTree,
+    AccountWitness,
+    BlockHeader,
+    BlockInputs,
+    BlockNumber,
+    Blockchain,
+    NullifierTree,
+    NullifierWitness,
+    ProvenBlock,
 };
-use tokio::{
-    sync::{Mutex, RwLock, oneshot},
-    time::Instant,
+use miden_objects::crypto::merkle::{
+    Forest,
+    Mmr,
+    MmrDelta,
+    MmrPeaks,
+    MmrProof,
+    PartialMmr,
+    SmtProof,
 };
+use miden_objects::note::{NoteDetails, NoteId, Nullifier};
+use miden_objects::transaction::{OutputNote, PartialBlockchain};
+use miden_objects::utils::Serializable;
+use miden_objects::{AccountError, Word};
+use tokio::sync::{Mutex, RwLock, oneshot};
 use tracing::{info, info_span, instrument};
 
-use crate::{
-    COMPONENT,
-    blocks::BlockStore,
-    db::{Db, NoteRecord, NoteSyncUpdate, NullifierInfo, Page, StateSyncUpdate},
-    errors::{
-        ApplyBlockError, DatabaseError, GetBatchInputsError, GetBlockHeaderError,
-        GetBlockInputsError, GetCurrentBlockchainDataError, InvalidBlockError, NoteSyncError,
-        StateInitializationError, StateSyncError,
-    },
+use crate::blocks::BlockStore;
+use crate::db::models::Page;
+use crate::db::models::queries::StorageMapValuesPage;
+use crate::db::{
+    AccountVaultValue,
+    Db,
+    NoteRecord,
+    NoteSyncUpdate,
+    NullifierInfo,
+    StateSyncUpdate,
 };
+use crate::errors::{
+    ApplyBlockError,
+    DatabaseError,
+    GetBatchInputsError,
+    GetBlockHeaderError,
+    GetBlockInputsError,
+    GetCurrentBlockchainDataError,
+    InvalidBlockError,
+    NoteSyncError,
+    StateInitializationError,
+    StateSyncError,
+};
+use crate::{COMPONENT, DataDirectory};
+
 // STRUCTURES
 // ================================================================================================
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TransactionInputs {
-    pub account_commitment: RpoDigest,
+    pub account_commitment: Word,
     pub nullifiers: Vec<NullifierInfo>,
-    pub found_unauthenticated_notes: BTreeSet<NoteId>,
+    pub found_unauthenticated_notes: HashSet<NoteId>,
+    pub new_account_id_prefix_is_unique: Option<bool>,
 }
 
 /// Container for state that needs to be updated atomically.
@@ -97,13 +120,23 @@ pub struct State {
 impl State {
     /// Loads the state from the `db`.
     #[instrument(target = COMPONENT, skip_all)]
-    pub async fn load(
-        mut db: Db,
-        block_store: Arc<BlockStore>,
-    ) -> Result<Self, StateInitializationError> {
-        let nullifier_tree = load_nullifier_tree(&mut db).await?;
+    pub async fn load(data_path: &Path) -> Result<Self, StateInitializationError> {
+        let data_directory = DataDirectory::load(data_path.to_path_buf())
+            .map_err(StateInitializationError::DataDirectoryLoadError)?;
+
+        let block_store = Arc::new(
+            BlockStore::load(data_directory.block_store_dir())
+                .map_err(StateInitializationError::BlockStoreLoadError)?,
+        );
+
+        let database_filepath = data_directory.database_path();
+        let mut db = Db::load(database_filepath.clone())
+            .await
+            .map_err(StateInitializationError::DatabaseLoadError)?;
+
         let chain_mmr = load_mmr(&mut db).await?;
-        let account_tree = load_accounts(&mut db).await?;
+        let account_tree = load_account_tree(&mut db).await?;
+        let nullifier_tree = load_nullifier_tree(&mut db).await?;
 
         let inner = RwLock::new(InnerState {
             nullifier_tree,
@@ -280,7 +313,7 @@ impl State {
                     },
                 };
 
-                let merkle_path = note_tree.get_note_path(note_index);
+                let inclusion_path = note_tree.open(note_index);
 
                 let note_record = NoteRecord {
                     block_num,
@@ -288,7 +321,7 @@ impl State {
                     note_id: note.id().into(),
                     metadata: *note.metadata(),
                     details,
-                    merkle_path,
+                    inclusion_path,
                 };
 
                 Ok((note_record, nullifier))
@@ -414,9 +447,9 @@ impl State {
             .collect()
     }
 
-    /// Queries a list of [`NoteRecord`] from the database.
+    /// Queries a list of notes from the database.
     ///
-    /// If the provided list of [`NoteId`] given is empty or no [`NoteRecord`] matches the provided
+    /// If the provided list of [`NoteId`] given is empty or no note matches the provided
     /// [`NoteId`] an empty list is returned.
     pub async fn get_notes_by_id(
         &self,
@@ -432,10 +465,10 @@ impl State {
         block_num: Option<BlockNumber>,
     ) -> Result<Option<(BlockHeader, MmrPeaks)>, GetCurrentBlockchainDataError> {
         let blockchain = &self.inner.read().await.blockchain;
-        if let Some(number) = block_num {
-            if number == self.latest_block_num().await {
-                return Ok(None);
-            }
+        if let Some(number) = block_num
+            && number == self.latest_block_num().await
+        {
+            return Ok(None);
         }
 
         // SAFETY: `select_block_header_by_block_num` will always return `Some(chain_tip_header)`
@@ -599,7 +632,7 @@ impl State {
         let delta = if block_num == state_sync.block_header.block_num() {
             // The client is in sync with the chain tip.
             MmrDelta {
-                forest: block_num.as_usize(),
+                forest: Forest::new(block_num.as_usize()),
                 data: vec![],
             }
         } else {
@@ -617,7 +650,7 @@ impl State {
             inner
                 .blockchain
                 .as_mmr()
-                .get_delta(from_forest, to_forest)
+                .get_delta(Forest::new(from_forest), Forest::new(to_forest))
                 .map_err(StateSyncError::FailedToBuildMmrDelta)?
         };
 
@@ -803,6 +836,20 @@ impl State {
 
         let account_commitment = inner.account_tree.get(account_id);
 
+        let new_account_id_prefix_is_unique = if account_commitment.is_empty() {
+            Some(!inner.account_tree.contains_account_id_prefix(account_id.prefix()))
+        } else {
+            None
+        };
+
+        // Non-unique account Id prefixes for new accounts are not allowed.
+        if let Some(false) = new_account_id_prefix_is_unique {
+            return Ok(TransactionInputs {
+                new_account_id_prefix_is_unique,
+                ..Default::default()
+            });
+        }
+
         let nullifiers = nullifiers
             .iter()
             .map(|nullifier| NullifierInfo {
@@ -818,6 +865,7 @@ impl State {
             account_commitment,
             nullifiers,
             found_unauthenticated_notes,
+            new_account_id_prefix_is_unique,
         })
     }
 
@@ -838,9 +886,10 @@ impl State {
     pub async fn get_account_proofs(
         &self,
         account_requests: Vec<AccountProofRequest>,
-        known_code_commitments: BTreeSet<RpoDigest>,
+        known_code_commitments: BTreeSet<Word>,
         include_headers: bool,
-    ) -> Result<(BlockNumber, Vec<AccountProofsResponse>), DatabaseError> {
+    ) -> Result<(BlockNumber, Vec<proto::rpc_store::account_proofs::AccountProof>), DatabaseError>
+    {
         // Lock inner state for the whole operation. We need to hold this lock to prevent the
         // database, account tree and latest block number from changing during the operation,
         // because changing one of them would lead to inconsistent state.
@@ -850,7 +899,7 @@ impl State {
             account_requests.iter().map(|req| req.account_id).collect();
 
         let state_headers = if include_headers.not() {
-            BTreeMap::<AccountId, AccountStateHeader>::default()
+            BTreeMap::<AccountId, proto::rpc_store::account_proofs::account_proof::AccountStateHeader>::default()
         } else {
             let infos = self.db.select_accounts_by_ids(account_ids.clone()).await?;
             if account_ids.len() > infos.len() {
@@ -881,7 +930,7 @@ impl State {
                             for map_key in storage_keys {
                                 let proof = storage_map.open(map_key);
 
-                                let slot_map_key = StorageSlotMapProof {
+                                let slot_map_key = proto::rpc_store::account_proofs::account_proof::account_state_header::StorageSlotMapProof {
                                     storage_slot: u32::from(*storage_index),
                                     smt_proof: proof.to_bytes(),
                                 };
@@ -898,12 +947,13 @@ impl State {
                         .not()
                         .then(|| details.code().to_bytes());
 
-                    let state_header = AccountStateHeader {
-                        header: Some(AccountHeader::from(details).into()),
-                        storage_header: details.storage().to_header().to_bytes(),
-                        account_code,
-                        storage_maps: storage_slot_map_keys,
-                    };
+                    let state_header =
+                        proto::rpc_store::account_proofs::account_proof::AccountStateHeader {
+                            header: Some(AccountHeader::from(details).into()),
+                            storage_header: details.storage().to_header().to_bytes(),
+                            account_code,
+                            storage_maps: storage_slot_map_keys,
+                        };
 
                     headers_map.insert(account_info.summary.account_id, state_header);
                 }
@@ -920,7 +970,7 @@ impl State {
 
                 let witness_record = AccountWitnessRecord { account_id, witness };
 
-                AccountProofsResponse {
+                proto::rpc_store::account_proofs::AccountProof {
                     witness: Some(witness_record.into()),
                     state_header,
                 }
@@ -930,15 +980,14 @@ impl State {
         Ok((inner_state.latest_block_num(), responses))
     }
 
-    /// Returns the state delta between `from_block` (exclusive) and `to_block` (inclusive) for the
-    /// given account.
-    pub(crate) async fn get_account_state_delta(
+    /// Returns storage map values for syncing within a block range.
+    pub(crate) async fn get_storage_map_sync_values(
         &self,
         account_id: AccountId,
-        from_block: BlockNumber,
-        to_block: BlockNumber,
-    ) -> Result<Option<AccountDelta>, DatabaseError> {
-        self.db.select_account_state_delta(account_id, from_block, to_block).await
+        block_from: BlockNumber,
+        block_to: BlockNumber,
+    ) -> Result<StorageMapValuesPage, DatabaseError> {
+        self.db.select_storage_map_sync_values(account_id, block_from, block_to).await
     }
 
     /// Loads a block from the block store. Return `Ok(None)` if the block is not found.
@@ -962,6 +1011,16 @@ impl State {
         self.db.optimize().await
     }
 
+    /// Returns account vault updates for specified account within a block range.
+    pub async fn sync_account_vault(
+        &self,
+        account_id: AccountId,
+        block_from: BlockNumber,
+        block_to: BlockNumber,
+    ) -> Result<(BlockNumber, Vec<AccountVaultValue>), DatabaseError> {
+        self.db.get_account_vault_sync(account_id, block_from, block_to).await
+    }
+
     /// Returns the unprocessed network notes, along with the next pagination token.
     pub async fn get_unconsumed_network_notes(
         &self,
@@ -969,35 +1028,35 @@ impl State {
     ) -> Result<(Vec<NoteRecord>, Page), DatabaseError> {
         self.db.select_unconsumed_network_notes(page).await
     }
+
+    /// Returns the network notes for an account that are unconsumed by a specified block number,
+    /// along with the next pagination token.
+    pub async fn get_unconsumed_network_notes_for_account(
+        &self,
+        network_account_id_prefix: NetworkAccountPrefix,
+        block_num: BlockNumber,
+        page: Page,
+    ) -> Result<(Vec<NoteRecord>, Page), DatabaseError> {
+        self.db
+            .select_unconsumed_network_notes_for_account(network_account_id_prefix, block_num, page)
+            .await
+    }
 }
 
 // UTILITIES
 // ================================================================================================
 
-#[instrument(level = "debug", target = COMPONENT, skip_all)]
+#[instrument(level = "info", target = COMPONENT, skip_all)]
 async fn load_nullifier_tree(db: &mut Db) -> Result<NullifierTree, StateInitializationError> {
     let nullifiers = db.select_all_nullifiers().await?;
-    let len = nullifiers.len();
 
-    let now = Instant::now();
-    let nullifier_tree = NullifierTree::with_entries(
-        nullifiers.into_iter().map(|info| (info.nullifier, info.block_num)),
-    )
-    .map_err(StateInitializationError::FailedToCreateNullifierTree)?;
-    let elapsed = now.elapsed().as_secs();
-
-    info!(
-        num_of_leaves = len,
-        tree_construction = elapsed,
-        COMPONENT,
-        "Loaded nullifier tree"
-    );
-    Ok(nullifier_tree)
+    NullifierTree::with_entries(nullifiers.into_iter().map(|info| (info.nullifier, info.block_num)))
+        .map_err(StateInitializationError::FailedToCreateNullifierTree)
 }
 
-#[instrument(level = "debug", target = COMPONENT, skip_all)]
+#[instrument(level = "info", target = COMPONENT, skip_all)]
 async fn load_mmr(db: &mut Db) -> Result<Mmr, StateInitializationError> {
-    let block_commitments: Vec<RpoDigest> = db
+    let block_commitments: Vec<Word> = db
         .select_all_block_headers()
         .await?
         .iter()
@@ -1007,8 +1066,8 @@ async fn load_mmr(db: &mut Db) -> Result<Mmr, StateInitializationError> {
     Ok(block_commitments.into())
 }
 
-#[instrument(level = "debug", target = COMPONENT, skip_all)]
-async fn load_accounts(db: &mut Db) -> Result<AccountTree, StateInitializationError> {
+#[instrument(level = "info", target = COMPONENT, skip_all)]
+async fn load_account_tree(db: &mut Db) -> Result<AccountTree, StateInitializationError> {
     let account_data = db.select_all_account_commitments().await?.into_iter().collect::<Vec<_>>();
 
     AccountTree::with_entries(account_data)

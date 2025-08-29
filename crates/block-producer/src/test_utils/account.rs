@@ -1,11 +1,10 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
-use miden_objects::{
-    Digest, Hasher,
-    account::{AccountId, AccountIdVersion, AccountStorageMode, AccountType},
-};
+use miden_objects::account::{AccountId, AccountIdVersion, AccountStorageMode, AccountType};
+use miden_objects::{Hasher, Word};
 
-pub static MOCK_ACCOUNTS: LazyLock<std::sync::Mutex<HashMap<u32, (AccountId, Digest)>>> =
+pub static MOCK_ACCOUNTS: LazyLock<std::sync::Mutex<HashMap<u32, (AccountId, Word)>>> =
     LazyLock::new(Default::default);
 
 /// A mock representation for private accounts. An account starts in state `states[0]`, is modified
@@ -15,12 +14,12 @@ pub struct MockPrivateAccount<const NUM_STATES: usize = 3> {
     pub id: AccountId,
 
     // Sequence states that the account goes into.
-    pub states: [Digest; NUM_STATES],
+    pub states: [Word; NUM_STATES],
 }
 
 impl<const NUM_STATES: usize> MockPrivateAccount<NUM_STATES> {
-    fn new(id: AccountId, initial_state: Digest) -> Self {
-        let mut states = [Digest::default(); NUM_STATES];
+    fn new(id: AccountId, initial_state: Word) -> Self {
+        let mut states = [Word::empty(); NUM_STATES];
 
         states[0] = initial_state;
 
@@ -37,21 +36,16 @@ impl<const NUM_STATES: usize> MockPrivateAccount<NUM_STATES> {
             AccountType::RegularAccountUpdatableCode,
             AccountStorageMode::Private,
             AccountIdVersion::Version0,
-            Digest::default(),
-            Digest::default(),
+            Word::empty(),
+            Word::empty(),
         )
         .unwrap();
 
         Self::new(
-            AccountId::new(
-                account_seed,
-                AccountIdVersion::Version0,
-                Digest::default(),
-                Digest::default(),
-            )
-            .unwrap(),
+            AccountId::new(account_seed, AccountIdVersion::Version0, Word::empty(), Word::empty())
+                .unwrap(),
             if new_account {
-                Digest::default()
+                Word::empty()
             } else {
                 Hasher::hash(&init_seed)
             },

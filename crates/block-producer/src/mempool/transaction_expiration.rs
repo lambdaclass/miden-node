@@ -1,6 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 
-use miden_objects::{block::BlockNumber, transaction::TransactionId};
+use miden_objects::block::BlockNumber;
+use miden_objects::transaction::TransactionId;
 
 /// Tracks transactions and their expiration block heights.
 ///
@@ -9,9 +11,9 @@ use miden_objects::{block::BlockNumber, transaction::TransactionId};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransactionExpirations {
     /// Transaction lookup index.
-    by_tx: BTreeMap<TransactionId, BlockNumber>,
+    by_tx: HashMap<TransactionId, BlockNumber>,
     /// Block number lookup index.
-    by_block: BTreeMap<BlockNumber, BTreeSet<TransactionId>>,
+    by_block: HashMap<BlockNumber, BTreeSet<TransactionId>>,
 }
 
 impl TransactionExpirations {

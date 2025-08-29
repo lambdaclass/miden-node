@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 
-use miden_objects::{
-    Digest,
-    batch::{BatchAccountUpdate, BatchId, ProvenBatch},
-    block::BlockNumber,
-    transaction::{InputNotes, OrderedTransactionHeaders, ProvenTransaction, TransactionHeader},
+use miden_objects::Word;
+use miden_objects::batch::{BatchAccountUpdate, BatchId, ProvenBatch};
+use miden_objects::block::BlockNumber;
+use miden_objects::transaction::{
+    InputNotes,
+    OrderedTransactionHeaders,
+    ProvenTransaction,
+    TransactionHeader,
 };
 
 use crate::test_utils::MockProvenTxBuilder;
@@ -58,7 +61,7 @@ impl TransactionBatchConstructor for ProvenBatch {
 
         ProvenBatch::new(
             BatchId::from_transactions(txs.iter().copied()),
-            Digest::default(),
+            Word::empty(),
             BlockNumber::GENESIS,
             account_updates,
             InputNotes::new_unchecked(input_notes),

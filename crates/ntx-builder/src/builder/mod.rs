@@ -1,14 +1,20 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures::TryStreamExt;
 use miden_node_proto::domain::account::NetworkAccountPrefix;
 use miden_node_utils::ErrorReport;
 use miden_remote_prover_client::remote_prover::tx_prover::RemoteTransactionProver;
-use tokio::{sync::Barrier, time};
+use tokio::sync::Barrier;
+use tokio::time;
 use url::Url;
 
-use crate::{MAX_IN_PROGRESS_TXS, block_producer::BlockProducerClient, store::StoreClient};
+use crate::MAX_IN_PROGRESS_TXS;
+use crate::block_producer::BlockProducerClient;
+use crate::store::StoreClient;
+use crate::transaction::NtxError;
 
 // NETWORK TRANSACTION BUILDER
 // ================================================================================================
@@ -23,7 +29,7 @@ pub struct NetworkTransactionBuilder {
     /// Address of the store gRPC server.
     pub store_url: Url,
     /// Address of the block producer gRPC server.
-    pub block_producer_address: SocketAddr,
+    pub block_producer_url: Url,
     /// Address of the remote prover. If `None`, transactions will be proven locally, which is
     /// undesirable due to the perofmrance impact.
     pub tx_prover_url: Option<Url>,
@@ -38,27 +44,15 @@ pub struct NetworkTransactionBuilder {
 
 impl NetworkTransactionBuilder {
     pub async fn serve_new(self) -> anyhow::Result<()> {
-        let store = StoreClient::new(&self.store_url);
-        let block_producer = BlockProducerClient::new(self.block_producer_address);
-
-        // Retry until the store is up and running. After this we expect all requests to pass.
-        let genesis_header = store
-            .genesis_header_with_retry()
-            .await
-            .context("failed to fetch genesis header")?;
+        let store = StoreClient::new(self.store_url);
+        let block_producer = BlockProducerClient::new(self.block_producer_url);
 
         let mut state = crate::state::State::load(store.clone())
             .await
             .context("failed to load ntx state")?;
 
-        let (chain_tip, _mmr) = store
-            .get_current_blockchain_data(None)
-            .await
-            .context("failed to fetch the chain tip data from the store")?
-            .context("chain tip data was None")?;
-
         let mut mempool_events = block_producer
-            .subscribe_to_mempool_with_retry(chain_tip.block_num())
+            .subscribe_to_mempool_with_retry(state.chain_tip())
             .await
             .context("failed to subscribe to mempool events")?;
 
@@ -82,7 +76,6 @@ impl NetworkTransactionBuilder {
 
         let context = crate::transaction::NtxContext {
             block_producer: block_producer.clone(),
-            genesis_header,
             prover,
         };
 
@@ -99,19 +92,21 @@ impl NetworkTransactionBuilder {
                         continue;
                     };
 
-                    let prefix = NetworkAccountPrefix::try_from(candidate.account.id()).unwrap();
+                    let network_account_prefix = NetworkAccountPrefix::try_from(candidate.account.id())
+                                                 .expect("all accounts managed by NTB are network accounts");
+                    let indexed_candidate = (network_account_prefix, candidate.chain_tip_header.block_num());
                     let task_id = inflight.spawn({
                         let context = context.clone();
                         context.execute_transaction(candidate)
                     }).id();
 
                     // SAFETY: This is definitely a network account.
-                    inflight_idx.insert(task_id, prefix);
+                    inflight_idx.insert(task_id, indexed_candidate);
                 },
                 event = mempool_events.try_next() => {
                     let event = event
-                        .context("mempool event stream ended")?
-                        .context("mempool event stream failed")?;
+                                .context("mempool event stream ended")?
+                                .context("mempool event stream failed")?;
                     state.mempool_update(event).await.context("failed to update state")?;
                 },
                 completed = inflight.join_next_with_id() => {
@@ -121,18 +116,34 @@ impl NetworkTransactionBuilder {
                         Err(join_handle) => join_handle.id(),
                     };
                     // SAFETY: both inflights should have the same set.
-                    let candidate = inflight_idx.remove(&task_id).unwrap();
+                    let (candidate, block_num) = inflight_idx.remove(&task_id).unwrap();
 
                     match completed {
-                        // Nothing to do. State will be updated by the eventual mempool event.
-                        Ok((_, Ok(_))) => {},
-                        // Inform state if the tx failed.
+                        // Some notes failed.
+                        Ok((_, Ok(failed))) => {
+                            let notes = failed.into_iter().map(|note| note.note).collect::<Vec<_>>();
+                            state.notes_failed(candidate, notes.as_slice(), block_num);
+                        },
+                        // Transaction execution failed.
                         Ok((_, Err(err))) => {
                             tracing::warn!(err=err.as_report(), "network transaction failed");
+                            match err {
+                                NtxError::AllNotesFailed(failed) => {
+                                    let notes = failed.into_iter().map(|note| note.note).collect::<Vec<_>>();
+                                    state.notes_failed(candidate, notes.as_slice(), block_num);
+                                },
+                                NtxError::InputNotes(_)
+                                | NtxError::NoteFilter(_)
+                                | NtxError::Execution(_)
+                                | NtxError::Proving(_)
+                                | NtxError::Submission(_)
+                                | NtxError::Panic(_) => {},
+                            }
                             state.candidate_failed(candidate);
                         },
+                        // Unexpected error occurred.
                         Err(err) => {
-                            tracing::warn!(err=err.as_report(), "network transaction panic'd");
+                            tracing::warn!(err=err.as_report(), "network transaction panicked");
                             state.candidate_failed(candidate);
                         }
                     }

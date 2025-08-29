@@ -1,15 +1,19 @@
-use std::{any::type_name, num::TryFromIntError};
+use std::any::type_name;
+use std::num::TryFromIntError;
 
-use miden_objects::{
-    crypto::merkle::{SmtLeafError, SmtProofError},
-    utils::DeserializationError,
-};
+use miden_objects::crypto::merkle::{SmtLeafError, SmtProofError};
+use miden_objects::utils::DeserializationError;
+use miden_objects::{AssetError, FeeError};
 use thiserror::Error;
 
 use crate::domain::note::NetworkNoteError;
 
 #[derive(Debug, Error)]
 pub enum ConversionError {
+    #[error("asset error")]
+    AssetError(#[from] AssetError),
+    #[error("fee parameters error")]
+    FeeError(#[from] FeeError),
     #[error("hex error")]
     HexError(#[from] hex::FromHexError),
     #[error("note error")]
@@ -28,6 +32,8 @@ pub enum ConversionError {
     InsufficientData { expected: usize, got: usize },
     #[error("value is not in the range 0..MODULUS")]
     NotAValidFelt,
+    #[error("merkle error")]
+    MerkleError(#[from] miden_objects::crypto::merkle::MerkleError),
     #[error("field `{entity}::{field_name}` is missing")]
     MissingFieldInProtobufRepresentation {
         entity: &'static str,
