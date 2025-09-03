@@ -83,40 +83,47 @@ impl rpc_server::Rpc for StoreApi {
     #[instrument(
         parent = None,
         target = COMPONENT,
-        name = "store.rpc_server.check_nullifiers_by_prefix",
+        name = "store.rpc_server.sync_nullifiers",
         skip_all,
         level = "debug",
         ret(level = "debug"),
         err
     )]
-    async fn check_nullifiers_by_prefix(
+    async fn sync_nullifiers(
         &self,
-        request: Request<proto::rpc_store::CheckNullifiersByPrefixRequest>,
-    ) -> Result<Response<proto::rpc_store::CheckNullifiersByPrefixResponse>, Status> {
+        request: Request<proto::rpc_store::SyncNullifiersRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncNullifiersResponse>, Status> {
         let request = request.into_inner();
 
         if request.prefix_len != 16 {
             return Err(Status::invalid_argument("Only 16-bit prefixes are supported"));
         }
 
-        let nullifiers = self
+        let chain_tip = self.state.latest_block_num().await;
+        let block_to = request.block_to.map_or(chain_tip, BlockNumber::from);
+
+        let (nullifiers, block_num) = self
             .state
-            .check_nullifiers_by_prefix(
+            .sync_nullifiers(
                 request.prefix_len,
                 request.nullifiers,
-                BlockNumber::from(request.block_num),
+                request.block_from.into(),
+                block_to,
             )
-            .await?
+            .await?;
+        let nullifiers = nullifiers
             .into_iter()
-            .map(|nullifier_info| {
-                proto::rpc_store::check_nullifiers_by_prefix_response::NullifierUpdate {
-                    nullifier: Some(nullifier_info.nullifier.into()),
-                    block_num: nullifier_info.block_num.as_u32(),
-                }
+            .map(|nullifier_info| proto::rpc_store::sync_nullifiers_response::NullifierUpdate {
+                nullifier: Some(nullifier_info.nullifier.into()),
+                block_num: nullifier_info.block_num.as_u32(),
             })
             .collect();
 
-        Ok(Response::new(proto::rpc_store::CheckNullifiersByPrefixResponse { nullifiers }))
+        Ok(Response::new(proto::rpc_store::SyncNullifiersResponse {
+            nullifiers,
+            block_num: block_num.as_u32(),
+            chain_tip: chain_tip.as_u32(),
+        }))
     }
 
     /// Returns info which can be used by the client to sync up to the latest state of the chain
