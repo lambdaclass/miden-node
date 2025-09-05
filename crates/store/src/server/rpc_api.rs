@@ -8,7 +8,6 @@ use miden_node_proto::{convert, try_convert};
 use miden_node_utils::ErrorReport as _;
 use miden_objects::Word;
 use miden_objects::account::AccountId;
-use miden_objects::block::BlockNumber;
 use miden_objects::note::NoteId;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, instrument};
@@ -100,15 +99,14 @@ impl rpc_server::Rpc for StoreApi {
         }
 
         let chain_tip = self.state.latest_block_num().await;
-        let block_to = request.block_to.map_or(chain_tip, BlockNumber::from);
+        let block_range = request
+            .block_range
+            .ok_or(invalid_argument("block_range is required"))?
+            .into_inclusive_range(chain_tip);
 
         let (nullifiers, block_num) = self
             .state
-            .sync_nullifiers(
-                request.prefix_len,
-                request.nullifiers,
-                request.block_from.into()..=block_to,
-            )
+            .sync_nullifiers(request.prefix_len, request.nullifiers, block_range)
             .await?;
         let nullifiers = nullifiers
             .into_iter()
@@ -119,9 +117,11 @@ impl rpc_server::Rpc for StoreApi {
             .collect();
 
         Ok(Response::new(proto::rpc_store::SyncNullifiersResponse {
+            pagination_info: Some(proto::rpc_store::PaginationInfo {
+                chain_tip: chain_tip.as_u32(),
+                block_num: block_num.as_u32(),
+            }),
             nullifiers,
-            block_num: block_num.as_u32(),
-            chain_tip: chain_tip.as_u32(),
         }))
     }
 
@@ -361,16 +361,17 @@ impl rpc_server::Rpc for StoreApi {
             )));
         }
 
-        let block_from = request.block_from.into();
-        let block_to: BlockNumber = request.block_to.map_or(chain_tip, BlockNumber::from);
+        let block_range = request.block_range.ok_or(invalid_argument("block_range is required"))?;
 
-        if block_to >= chain_tip {
+        let block_range = block_range.into_inclusive_range(chain_tip);
+
+        if block_range.end() > &chain_tip {
             return Err(Status::invalid_argument("block_to cannot be higher than the chain tip"));
         }
 
         let (last_included_block, updates) = self
             .state
-            .sync_account_vault(account_id, block_from..=block_to)
+            .sync_account_vault(account_id, block_range)
             .await
             .map_err(internal_error)?;
 
@@ -384,8 +385,10 @@ impl rpc_server::Rpc for StoreApi {
             .collect();
 
         Ok(Response::new(proto::rpc_store::SyncAccountVaultResponse {
-            block_num: last_included_block.as_u32(),
-            chain_tip: chain_tip.as_u32(),
+            pagination_info: Some(proto::rpc_store::PaginationInfo {
+                chain_tip: chain_tip.as_u32(),
+                block_num: last_included_block.as_u32(),
+            }),
             updates,
         }))
     }
@@ -416,21 +419,19 @@ impl rpc_server::Rpc for StoreApi {
             )));
         }
 
-        let block_from = BlockNumber::from(request.block_from);
         let chain_tip = self.state.latest_block_num().await;
+        let block_range = request
+            .block_range
+            .ok_or(invalid_argument("block_range is required"))?
+            .into_inclusive_range(chain_tip);
 
-        let block_to = match request.block_to {
-            Some(block_to) => BlockNumber::from(block_to),
-            None => chain_tip,
-        };
-
-        if block_from > block_to {
+        if block_range.start() > block_range.end() {
             return Err(Status::invalid_argument("block_from cannot be greater than block_to"));
         }
 
         let storage_maps_page = self
             .state
-            .get_storage_map_sync_values(account_id, block_from..=block_to)
+            .get_storage_map_sync_values(account_id, block_range)
             .await
             .map_err(internal_error)?;
 
@@ -446,8 +447,10 @@ impl rpc_server::Rpc for StoreApi {
             .collect();
 
         Ok(Response::new(proto::rpc_store::SyncStorageMapsResponse {
-            block_num: storage_maps_page.last_block_included.as_u32(),
-            chain_tip: chain_tip.as_u32(),
+            pagination_info: Some(proto::rpc_store::PaginationInfo {
+                chain_tip: chain_tip.as_u32(),
+                block_num: storage_maps_page.last_block_included.as_u32(),
+            }),
             updates,
         }))
     }
