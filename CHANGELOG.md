@@ -1,11 +1,10 @@
 # Changelog
 
-## v0.11.1 (2025-09-02)
-
-### Fixes
+## v0.11.1 (2025-09-08)
 
 - Removed decorators from scripts when submitting transactions and batches, and inserting notes into the DB ([#1194](https://github.com/
 0xMiden/miden-node/pull/1194)).
+- Refresh `miden-base` dependencies.
 
 ## v0.11.0 (2025-08-28)
 
