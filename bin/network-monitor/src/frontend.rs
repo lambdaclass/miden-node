@@ -3,7 +3,6 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Context;
 use axum::Router;
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
@@ -12,13 +11,18 @@ use tokio::sync::watch;
 use tracing::{info, instrument};
 
 use crate::COMPONENT;
-use crate::status::{MonitorConfig, NetworkStatus, ServiceStatus};
+use crate::config::MonitorConfig;
+use crate::status::{NetworkStatus, ServiceStatus};
+
+// SERVER STATE
+// ================================================================================================
 
 /// State for the web server containing watch receivers for all services.
 #[derive(Clone)]
 pub struct ServerState {
     pub rpc: watch::Receiver<ServiceStatus>,
-    pub provers: Vec<watch::Receiver<ServiceStatus>>,
+    pub provers: Vec<(watch::Receiver<ServiceStatus>, watch::Receiver<ServiceStatus>)>,
+    pub faucet: Option<watch::Receiver<ServiceStatus>>,
 }
 
 /// Runs the frontend server.
@@ -29,7 +33,7 @@ pub struct ServerState {
 ///
 /// * `server_state` - The server state containing watch receivers for all services.
 /// * `config` - The configuration of the network.
-pub async fn serve(server_state: ServerState, config: MonitorConfig) -> anyhow::Result<()> {
+pub async fn serve(server_state: ServerState, config: MonitorConfig) {
     // build our application with routes
     let app = Router::new()
         // Serve embedded assets
@@ -46,9 +50,8 @@ pub async fn serve(server_state: ServerState, config: MonitorConfig) -> anyhow::
     info!("Dashboard available at: http://localhost:{}/", config.port);
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
-        .context("Failed to bind to address")?;
-    axum::serve(listener, app).await.context("Failed to start web server")?;
-    Ok(())
+        .expect("Failed to bind to address");
+    axum::serve(listener, app).await.expect("Failed to start web server");
 }
 
 async fn get_dashboard() -> Html<&'static str> {
@@ -70,8 +73,14 @@ async fn get_status(
     services.push(server_state.rpc.borrow().clone());
 
     // Collect all remote prover statuses
-    for prover_rx in &server_state.provers {
-        services.push(prover_rx.borrow().clone());
+    for (prover_status_rx, prover_test_rx) in &server_state.provers {
+        services.push(prover_status_rx.borrow().clone());
+        services.push(prover_test_rx.borrow().clone());
+    }
+
+    // Collect faucet status if available
+    if let Some(faucet_rx) = &server_state.faucet {
+        services.push(faucet_rx.borrow().clone());
     }
 
     let network_status = NetworkStatus { services, last_updated: current_time };

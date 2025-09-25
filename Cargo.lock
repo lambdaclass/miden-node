@@ -1513,7 +1513,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2204,8 +2204,15 @@ dependencies = [
  "axum",
  "miden-node-proto",
  "miden-node-utils",
+ "miden-objects",
+ "miden-testing",
+ "miden-tx",
+ "reqwest",
  "serde",
+ "serde_json",
+ "sha2",
  "tokio",
+ "tonic",
  "tracing",
  "url",
 ]
@@ -3263,7 +3270,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "sfv",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "strum",
  "strum_macros",
  "tokio",
@@ -4346,6 +4353,17 @@ dependencies = [
  "base64",
  "indexmap 2.11.0",
  "rust_decimal",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]
