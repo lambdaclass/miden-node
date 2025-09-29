@@ -1,3 +1,8 @@
+---
+title: "Architecture"
+sidebar_position: 2
+---
+
 # Node architecture
 
 The node itself consists of four distributed components: store, block-producer, network transaction builder, and RPC.
@@ -10,7 +15,7 @@ mode.
 The inter-component communication is done using a gRPC API which is assumed trusted. In other words this _must not_ be
 public. External communication is handled by the RPC component with a separate external-only gRPC API.
 
-[![node architecture](../resources/operator_architecture.svg)](../resources/operator_architecture.svg)
+[![node architecture](../img/operator_architecture.svg)](../img/operator_architecture.svg)
 
 ## RPC
 

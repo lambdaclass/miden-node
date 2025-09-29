@@ -1,3 +1,8 @@
+---
+title: "Node gRPC Reference"
+sidebar_position: 1
+---
+
 # gRPC Reference
 
 This is a reference of the Node's public RPC interface. It consists of a gRPC API which may be used to submit transactions and query the state of the blockchain.
@@ -64,7 +69,7 @@ This endpoint accepts a proven transaction and attempts to add it to the mempool
 When transaction submission fails, detailed error information is provided through gRPC status details. The following error codes may be returned:
 
 | Error Code                             | Value | gRPC Status        | Description                                                   |
-|----------------------------------------|-------|--------------------|---------------------------------------------------------------|
+| -------------------------------------- | ----- | ------------------ | ------------------------------------------------------------- |
 | `UNSPECIFIED_ERROR`                    | 0     | `INTERNAL`         | Default/unspecified error                                     |
 | `INTERNAL_ERROR`                       | 1     | `INTERNAL`         | Internal server error occurred                                |
 | `DESERIALIZATION_FAILED`               | 2     | `INVALID_ARGUMENT` | Transaction could not be deserialized                         |
@@ -140,6 +145,7 @@ The `Status.details` field contains the specific error code serialized as raw by
 - **Mapping**: Map the numeric value to the corresponding error enum
 
 **Example decoding** (pseudocode):
+
 ```
 if status.details.length > 0:
     error_code = status.details[0]  // Extract first byte

@@ -1,3 +1,7 @@
+---
+sidebar_position: 3
+---
+
 # Installation
 
 We provide Debian packages for official releases for the node software. Alternatively, it also can be installed from source on most systems using the Rust package manager `cargo`.
@@ -67,9 +71,10 @@ More information on the various `cargo install` options can be found
 
 ## Updating
 
-> [!WARNING]
-> We currently have no backwards compatibility guarantees. This means updating your node is destructive - your
-> existing chain will not work with the new version. This will change as our protocol and database schema mature and
-> settle.
+:::warning
+We currently have no backwards compatibility guarantees. This means updating your node is destructive - your
+existing chain will not work with the new version. This will change as our protocol and database schema mature and
+settle.
+:::
 
-Updating the node to a new version is as simply as re-running the install process and repeating the [bootstrapping](./usage.md#bootstrapping) instructions.
+Updating the node to a new version is as simply as re-running the install process and repeating the [bootstrapping](./usage#bootstrapping) instructions.

@@ -1,3 +1,7 @@
+---
+sidebar_position: 6
+---
+
 # Versioning
 
 We follow the [semver](https://semver.org/) standard for versioning.

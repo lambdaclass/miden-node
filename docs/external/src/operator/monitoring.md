@@ -1,3 +1,8 @@
+---
+title: "Monitoring"
+sidebar_position: 5
+---
+
 # Monitoring & telemetry
 
 We provide logging to `stdout` and an optional [OpenTelemetry](https://opentelemetry.io/) exporter for our traces.
@@ -158,6 +163,7 @@ miden-node bundled start --enable-otel
 Here are some useful Honeycomb queries to help monitor your Miden node:
 
 **Block building performance**:
+
 ```honeycomb
 VISUALIZE
 HEATMAP(duration_ms) AVG(duration_ms)
@@ -169,6 +175,7 @@ LIMIT 100
 ```
 
 **Batch processing latency**:
+
 ```honeycomb
 VISUALIZE
 HEATMAP(duration_ms) AVG(duration_ms) P95(duration_ms)
@@ -179,6 +186,7 @@ LIMIT 100
 ```
 
 **Block proving failures**:
+
 ```honeycomb
 VISUALIZE
 COUNT
@@ -189,6 +197,7 @@ CALCULATE RATE
 ```
 
 **Transaction volume by block**:
+
 ```honeycomb
 VISUALIZE
 MAX(transactions.count)
@@ -198,7 +207,9 @@ GROUP BY block.number
 ORDER BY block.number DESC
 LIMIT 100
 ```
+
 **RPC request rate by endpoint**:
+
 ```honeycomb
 VISUALIZE
 COUNT
@@ -208,6 +219,7 @@ GROUP BY name
 ```
 
 **RPC latency by endpoint**:
+
 ```honeycomb
 VISUALIZE
 AVG(duration_ms) P95(duration_ms)
@@ -217,6 +229,7 @@ GROUP BY name
 ```
 
 **RPC errors by status code**:
+
 ```honeycomb
 VISUALIZE
 COUNT
@@ -230,26 +243,32 @@ GROUP BY status_code
 Create triggers in Honeycomb to alert you when important thresholds are crossed:
 
 **Slow block building**:
-* Query:
+
+- Query:
+
 ```honeycomb
 VISUALIZE
 AVG(duration_ms)
 WHERE
 name = "block_builder.build_block"
 ```
-* Trigger condition: `AVG(duration_ms) > 30000` (adjust based on your expected block time)
-* Description: Alert when blocks take too long to build (more than 30 seconds on average)
+
+- Trigger condition: `AVG(duration_ms) > 30000` (adjust based on your expected block time)
+- Description: Alert when blocks take too long to build (more than 30 seconds on average)
 
 **High failure rate**:
-* Query:
+
+- Query:
+
 ```honeycomb
 VISUALIZE
 COUNT
 WHERE
 name = "block_builder.build_block" AND error = true
 ```
-* Trigger condition: `COUNT > 100 WHERE error = true`
-* Description: Alert when more than 100 block builds are failing
+
+- Trigger condition: `COUNT > 100 WHERE error = true`
+- Description: Alert when more than 100 block builds are failing
 
 #### Advanced investigation with BubbleUp
 
@@ -261,6 +280,7 @@ To identify the root cause of performance issues or errors, use Honeycomb's Bubb
 4. Inspect the related spans in the trace to pinpoint the exact step causing problems
 
 This approach helps identify patterns like:
+
 - Which types of transactions are causing slow blocks
 - Which specific operations within block/batch processing take the most time
 - Correlations between resource usage and performance
