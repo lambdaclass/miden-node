@@ -14,6 +14,10 @@
 - Implemented storage map `DataStore` function ([#1226](https://github.com/0xMiden/miden-node/pull/1226)).
 - [BREAKING] Renamed `RemoteProverProxy` to `RemoteProverClient` ([#1236](https://github.com/0xMiden/miden-node/pull/1236)).
 
+## v0.11.2 (2025-09-10)
+
+- Added support for keepalive requests against base path `/` of RPC server ([#1212](https://github.com/0xMiden/miden-node/pull/1212)).
+
 ## v0.11.1 (2025-09-08)
 
 - Removed decorators from scripts when submitting transactions and batches, and inserting notes into the DB ([#1194](https://github.com/
