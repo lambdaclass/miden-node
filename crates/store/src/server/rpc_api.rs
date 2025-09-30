@@ -483,4 +483,57 @@ impl rpc_server::Rpc for StoreApi {
             script: note_script.map(Into::into),
         }))
     }
+
+    #[instrument(
+        parent = None,
+        target = COMPONENT,
+        name = "store.rpc_server.sync_transactions",
+        skip_all,
+        ret(level = "debug"),
+        err
+    )]
+    async fn sync_transactions(
+        &self,
+        request: Request<proto::rpc_store::SyncTransactionsRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncTransactionsResponse>, Status> {
+        debug!(target: COMPONENT, request = ?request);
+
+        let request = request.into_inner();
+
+        let chain_tip = self.state.latest_block_num().await;
+        let block_range = request.block_range.ok_or(invalid_argument("block_range is required"))?;
+        let block_range = block_range.into_inclusive_range(chain_tip);
+
+        let account_ids: Vec<AccountId> = read_account_ids(&request.account_ids)?;
+
+        let (last_block_included, transaction_records_db) = self
+            .state
+            .sync_transactions(account_ids, block_range.clone())
+            .await
+            .map_err(internal_error)?;
+
+        // Convert database TransactionRecord to proto TransactionRecord
+        let mut transaction_records = Vec::with_capacity(transaction_records_db.len());
+
+        for tx_header in transaction_records_db {
+            // Retrieve full note data for output notes from the database
+            let note_records = self
+                .state
+                .get_notes_by_id(tx_header.output_notes.clone())
+                .await
+                .map_err(internal_error)?;
+
+            // Convert to proto using the helper method
+            let proto_record = tx_header.into_proto_with_note_records(note_records);
+            transaction_records.push(proto_record);
+        }
+
+        Ok(Response::new(proto::rpc_store::SyncTransactionsResponse {
+            pagination_info: Some(proto::rpc_store::PaginationInfo {
+                chain_tip: chain_tip.as_u32(),
+                block_num: last_block_included.as_u32(),
+            }),
+            transaction_records,
+        }))
+    }
 }

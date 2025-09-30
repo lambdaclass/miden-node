@@ -19,6 +19,7 @@ The gRPC service definition can be found in the Miden node's `proto` [directory]
 - [SyncNotes](#syncnotes)
 - [SyncState](#syncstate)
 - [SyncStorageMaps](#syncstoragemaps)
+- [SyncTransactions](#synctransactions)
 - [Status](#status)
 
 <!--toc:end-->
@@ -115,6 +116,10 @@ Returns storage map synchronization data for a specified public account within a
 Caller specifies the `account_id` of the public account and the block range (`block_from`, `block_to`) for which to retrieve storage updates. The response includes all storage map key-value updates that occurred within that range, along with the last block included in the sync and the current chain tip.
 
 This endpoint enables clients to maintain an updated view of account storage.
+
+### SyncTransactions
+
+Returns transaction records for specific accounts within a block range.
 
 ### Status
 
