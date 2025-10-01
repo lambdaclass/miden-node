@@ -1,3 +1,5 @@
+use tracing::field;
+
 use crate::tracing::OpenTelemetrySpanExt;
 
 /// Returns a [`trace_fn`](tonic::transport::server::Server) implementation for gRPC requests
@@ -8,8 +10,24 @@ use crate::tracing::OpenTelemetrySpanExt;
 /// Additionally also pulls in remote tracing context which allows the server trace to be connected
 /// to the client's origin trace.
 pub fn grpc_trace_fn<T>(request: &http::Request<T>) -> tracing::Span {
-    // Create a span with a generic, static name.
-    let span = tracing::info_span!("rpc", rpc.uri = %request.uri());
+    // A gRPC request's path ends with `../<service>/<method>`.
+    let mut path_segments = request.uri().path().rsplit('/');
+
+    let service = path_segments.next().unwrap_or_default();
+    let method = path_segments.next().unwrap_or_default();
+
+    // Create a span with a generic, static name. Fields to be recorded after needs to be
+    // initialized as empty since otherwise the assignment will have no effect.
+    let span = tracing::info_span!(
+        "rpc",
+        otel.name = field::Empty,
+        rpc.service = service,
+        rpc.method = method
+    );
+
+    // Set the span name via otel.name
+    let otel_name = format!("{service}/{method}");
+    span.record("otel.name", otel_name);
 
     // Pull the open-telemetry parent context using the HTTP extractor
     let otel_ctx = opentelemetry::global::get_text_map_propagator(|propagator| {
