@@ -250,10 +250,9 @@ pub struct AccountVaultUpdate {
 /// contains a note matching `note_tags` or the chain tip.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SyncNotesRequest {
-    /// Last block known by the client. The response will contain data starting from the next block,
-    /// until the first block which contains a note of matching the requested tag.
-    #[prost(fixed32, tag = "1")]
-    pub block_num: u32,
+    /// Block range from which to start synchronizing.
+    #[prost(message, optional, tag = "1")]
+    pub block_range: ::core::option::Option<BlockRange>,
     /// Specifies the tags which the client is interested in.
     #[prost(fixed32, repeated, tag = "2")]
     pub note_tags: ::prost::alloc::vec::Vec<u32>,
@@ -261,9 +260,9 @@ pub struct SyncNotesRequest {
 /// Represents the result of syncing notes request.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SyncNotesResponse {
-    /// Number of the latest block in the chain.
-    #[prost(fixed32, tag = "1")]
-    pub chain_tip: u32,
+    /// Pagination information.
+    #[prost(message, optional, tag = "1")]
+    pub pagination_info: ::core::option::Option<PaginationInfo>,
     /// Block header of the block with the first note matching the specified criteria.
     #[prost(message, optional, tag = "2")]
     pub block_header: ::core::option::Option<super::blockchain::BlockHeader>,
