@@ -12,6 +12,7 @@ use miden_objects::account::{
 };
 use miden_objects::asset::{Asset, AssetVault};
 use miden_objects::block::{AccountWitness, BlockNumber};
+use miden_objects::crypto::merkle::SparseMerklePath;
 use miden_objects::note::{NoteExecutionMode, NoteTag};
 use miden_objects::utils::{Deserializable, DeserializationError, Serializable};
 use thiserror::Error;
@@ -745,10 +746,11 @@ impl TryFrom<proto::account::AccountWitness> for AccountWitnessRecord {
             .commitment
             .ok_or(proto::account::AccountWitness::missing_field(stringify!(commitment)))?
             .try_into()?;
-        let path = account_witness_record
+        let path: SparseMerklePath = account_witness_record
             .path
             .as_ref()
             .ok_or(proto::account::AccountWitness::missing_field(stringify!(path)))?
+            .clone()
             .try_into()?;
 
         let witness = AccountWitness::new(witness_id, commitment, path).map_err(|err| {
@@ -774,7 +776,7 @@ impl From<AccountWitnessRecord> for proto::account::AccountWitness {
             account_id: Some(from.account_id.into()),
             witness_id: Some(from.witness.id().into()),
             commitment: Some(from.witness.state_commitment().into()),
-            path: Some(from.witness.into_proof().into_parts().0.into()),
+            path: Some(from.witness.path().clone().into()),
         }
     }
 }
