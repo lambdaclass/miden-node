@@ -2059,7 +2059,7 @@ dependencies = [
 [[package]]
 name = "miden-block-prover"
 version = "0.12.0"
-source = "git+https://github.com/0xMiden/miden-base?branch=next#62feca75399d54f0d840f3aa3d5d345fe2f87e85"
+source = "git+https://github.com/lambdaclass/miden-base?branch=re-export-vm#33214b12cecc27c52d06926f17369b483692e5dd"
 dependencies = [
  "miden-lib",
  "miden-objects",
@@ -2131,7 +2131,7 @@ dependencies = [
 [[package]]
 name = "miden-lib"
 version = "0.12.0"
-source = "git+https://github.com/0xMiden/miden-base?branch=next#62feca75399d54f0d840f3aa3d5d345fe2f87e85"
+source = "git+https://github.com/lambdaclass/miden-base?branch=re-export-vm#33214b12cecc27c52d06926f17369b483692e5dd"
 dependencies = [
  "miden-assembly",
  "miden-objects",
@@ -2454,11 +2454,12 @@ dependencies = [
 [[package]]
 name = "miden-objects"
 version = "0.12.0"
-source = "git+https://github.com/0xMiden/miden-base?branch=next#62feca75399d54f0d840f3aa3d5d345fe2f87e85"
+source = "git+https://github.com/lambdaclass/miden-base?branch=re-export-vm#33214b12cecc27c52d06926f17369b483692e5dd"
 dependencies = [
  "bech32",
  "getrandom 0.3.3",
  "miden-assembly",
+ "miden-assembly-syntax",
  "miden-core",
  "miden-crypto",
  "miden-mast-package",
@@ -2587,7 +2588,7 @@ dependencies = [
 [[package]]
 name = "miden-testing"
 version = "0.12.0"
-source = "git+https://github.com/0xMiden/miden-base?branch=next#62feca75399d54f0d840f3aa3d5d345fe2f87e85"
+source = "git+https://github.com/lambdaclass/miden-base?branch=re-export-vm#33214b12cecc27c52d06926f17369b483692e5dd"
 dependencies = [
  "anyhow",
  "itertools",
@@ -2607,7 +2608,7 @@ dependencies = [
 [[package]]
 name = "miden-tx"
 version = "0.12.0"
-source = "git+https://github.com/0xMiden/miden-base?branch=next#62feca75399d54f0d840f3aa3d5d345fe2f87e85"
+source = "git+https://github.com/lambdaclass/miden-base?branch=re-export-vm#33214b12cecc27c52d06926f17369b483692e5dd"
 dependencies = [
  "miden-lib",
  "miden-objects",
@@ -2622,7 +2623,7 @@ dependencies = [
 [[package]]
 name = "miden-tx-batch-prover"
 version = "0.12.0"
-source = "git+https://github.com/0xMiden/miden-base?branch=next#62feca75399d54f0d840f3aa3d5d345fe2f87e85"
+source = "git+https://github.com/lambdaclass/miden-base?branch=re-export-vm#33214b12cecc27c52d06926f17369b483692e5dd"
 dependencies = [
  "miden-objects",
  "miden-tx",

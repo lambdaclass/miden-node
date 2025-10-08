@@ -85,7 +85,7 @@ check: ## Check all targets and features for errors without code generation
 
 .PHONY: build
 build: ## Builds all crates and re-builds protobuf bindings for proto crates
-	${BUILD_PROTO} cargo build --locked --workspace
+	${BUILD_PROTO} cargo build --workspace
 	${BUILD_PROTO} cargo build --locked -p miden-remote-prover-client --target wasm32-unknown-unknown --no-default-features  # no-std compatible build
 
 # --- installing ----------------------------------------------------------------------------------
