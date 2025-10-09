@@ -66,8 +66,7 @@ mod nodes;
 mod state;
 mod subscription;
 
-// FIXME(Mirko): Re-enable these once mempool refactor is completed.
-#[cfg(all(false, test))]
+#[cfg(test)]
 mod tests;
 
 #[derive(Clone)]
@@ -521,10 +520,7 @@ impl Mempool {
                         "Reverted batch as part of block rollback"
                     );
                 },
-                NodeId::Transaction(_) => {},
-                NodeId::Block(block_number) => panic!(
-                    "Found block {block_number} descendent while reverting a block which shouldn't be possible since only one block is in progress"
-                ),
+                NodeId::Transaction(_) | NodeId::Block(_) => {},
             }
 
             for tx in node.transactions() {
@@ -601,7 +597,7 @@ impl Mempool {
                     },
                     NodeId::Transaction(_) => {},
                     NodeId::Block(block_number) => panic!(
-                        "Found block {block_number} descendent while reverting a block which shouldn't be possible since only one block is in progress"
+                        "Found block {block_number} descendent while reverting expired nodes which shouldn't be possible since only one block is in progress"
                     ),
                 }
 
@@ -671,18 +667,38 @@ impl Mempool {
         reverted
     }
 
+    /// Rejects authentication height's which we cannot guarantee are correct from the locally
+    /// retained state.
+    ///
+    /// In other words, this returns an error if the authentication height is more than one block
+    /// older than the locally retained state. One block is allowed because this means block `N-1`
+    /// was authenticated by the store, and we can check blocks `N..chain_tip`.
+    ///
+    /// # Panics
+    ///
+    /// This panics if the authentication height exceeds the latest locally known block. This
+    /// includes any proposed block since the block is committed to the mempool and store
+    /// concurrently (or at least can be).
     fn authentication_staleness_check(
         &self,
         authentication_height: BlockNumber,
     ) -> Result<(), AddTransactionError> {
         let oldest = self.nodes.oldest_committed_block().unwrap_or_default();
+        let limit = oldest.parent().unwrap_or_default();
 
-        if authentication_height < oldest {
+        if authentication_height < limit {
             return Err(AddTransactionError::StaleInputs {
                 input_block: authentication_height,
-                stale_limit: oldest,
+                stale_limit: limit,
             });
         }
+
+        let latest_block =
+            self.nodes.proposed_block.as_ref().map_or(self.chain_tip, |(number, _)| *number);
+        assert!(
+            authentication_height <= latest_block,
+            "Authentication height {authentication_height} exceeded the latest known block {latest_block}"
+        );
 
         Ok(())
     }
