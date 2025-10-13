@@ -2509,6 +2509,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miden-node-grpc-error-macro"
+version = "0.12.0"
+dependencies = [
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
 name = "miden-node-ntx-builder"
 version = "0.12.0"
 dependencies = [
@@ -2537,6 +2545,7 @@ dependencies = [
  "fs-err",
  "hex",
  "http",
+ "miden-node-grpc-error-macro",
  "miden-node-proto-build",
  "miden-node-utils",
  "miden-objects",
