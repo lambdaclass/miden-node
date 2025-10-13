@@ -6,7 +6,7 @@ use miden_objects::account::AccountId;
 use miden_objects::batch::{BatchId, ProvenBatch};
 use miden_objects::block::BlockNumber;
 use miden_objects::note::{NoteHeader, NoteId, Nullifier};
-use miden_objects::transaction::{TransactionHeader, TransactionId};
+use miden_objects::transaction::{InputNoteCommitment, TransactionHeader, TransactionId};
 
 use crate::domain::transaction::AuthenticatedTransaction;
 
@@ -216,11 +216,14 @@ impl Node for ProposedBatchNode {
 
 impl Node for ProvenBatchNode {
     fn nullifiers(&self) -> Box<dyn Iterator<Item = Nullifier> + '_> {
-        Box::new(self.tx_headers().flat_map(|tx| tx.input_notes().iter().copied()))
+        Box::new(
+            self.tx_headers()
+                .flat_map(|tx| tx.input_notes().iter().map(InputNoteCommitment::nullifier)),
+        )
     }
 
     fn output_notes(&self) -> Box<dyn Iterator<Item = NoteId> + '_> {
-        Box::new(self.tx_headers().flat_map(|tx| tx.output_notes().iter().copied()))
+        Box::new(self.tx_headers().flat_map(|tx| tx.output_notes().iter().map(NoteHeader::id)))
     }
 
     fn unauthenticated_notes(&self) -> Box<dyn Iterator<Item = NoteId> + '_> {

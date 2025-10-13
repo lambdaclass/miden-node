@@ -19,6 +19,7 @@ The gRPC service definition can be found in the Miden node's `proto` [directory]
 - [SyncNotes](#syncnotes)
 - [SyncState](#syncstate)
 - [SyncStorageMaps](#syncstoragemaps)
+- [SyncTransactions](#synctransactions)
 - [Status](#status)
 
 <!--toc:end-->
@@ -63,17 +64,16 @@ This endpoint accepts a proven transaction and attempts to add it to the mempool
 
 When transaction submission fails, detailed error information is provided through gRPC status details. The following error codes may be returned:
 
-| Error Code                             | Value | gRPC Status        | Description                                                   |
-|----------------------------------------|-------|--------------------|---------------------------------------------------------------|
-| `UNSPECIFIED_ERROR`                    | 0     | `INTERNAL`         | Default/unspecified error                                     |
-| `INTERNAL_ERROR`                       | 1     | `INTERNAL`         | Internal server error occurred                                |
-| `DESERIALIZATION_FAILED`               | 2     | `INVALID_ARGUMENT` | Transaction could not be deserialized                         |
-| `INVALID_TRANSACTION_PROOF`            | 3     | `INVALID_ARGUMENT` | Transaction execution proof is invalid                        |
-| `INCORRECT_ACCOUNT_INITIAL_COMMITMENT` | 4     | `INVALID_ARGUMENT` | Account's initial state doesn't match current state           |
-| `INPUT_NOTES_ALREADY_CONSUMED`         | 5     | `INVALID_ARGUMENT` | Input notes have already been consumed by another transaction |
-| `UNAUTHENTICATED_NOTES_NOT_FOUND`      | 6     | `INVALID_ARGUMENT` | Required unauthenticated notes were not found                 |
-| `OUTPUT_NOTES_ALREADY_EXIST`           | 7     | `INVALID_ARGUMENT` | Output note IDs are already in use                            |
-| `TRANSACTION_EXPIRED`                  | 8     | `INVALID_ARGUMENT` | Transaction has exceeded its expiration block height          |
+| Error Code                                    | Value | gRPC Status        | Description                                                   |
+|-----------------------------------------------|-------|--------------------|---------------------------------------------------------------|
+| `INTERNAL_ERROR`                              | 0     | `INTERNAL`         | Internal server error occurred                                |
+| `DESERIALIZATION_FAILED`                      | 1     | `INVALID_ARGUMENT` | Transaction could not be deserialized                         |
+| `INVALID_TRANSACTION_PROOF`                   | 2     | `INVALID_ARGUMENT` | Transaction execution proof is invalid                        |
+| `INCORRECT_ACCOUNT_INITIAL_COMMITMENT`        | 3     | `INVALID_ARGUMENT` | Account's initial state doesn't match current state           |
+| `INPUT_NOTES_ALREADY_CONSUMED`                | 4     | `INVALID_ARGUMENT` | Input notes have already been consumed by another transaction |
+| `UNAUTHENTICATED_NOTES_NOT_FOUND`             | 5     | `INVALID_ARGUMENT` | Required unauthenticated notes were not found                 |
+| `OUTPUT_NOTES_ALREADY_EXIST`                  | 6     | `INVALID_ARGUMENT` | Output note IDs are already in use                            |
+| `TRANSACTION_EXPIRED`                         | 7     | `INVALID_ARGUMENT` | Transaction has exceeded its expiration block height          |
 
 ### SyncNullifiers
 
@@ -93,7 +93,7 @@ For any `[block_from..block_to]` range, the latest known set of assets is return
 
 Iteratively sync data for a given set of note tags.
 
-Client specify the note tags of interest and the block height from which to search. The response returns the next block containing note matching the provided tags.
+Client specifies the `note_tags` they are interested in, and the block range from which to search for matching notes. The request will then return the next block containing any note matching the provided tags within the specified range.
 
 The response includes each note's metadata and inclusion proof.
 
@@ -116,6 +116,10 @@ Returns storage map synchronization data for a specified public account within a
 Caller specifies the `account_id` of the public account and the block range (`block_from`, `block_to`) for which to retrieve storage updates. The response includes all storage map key-value updates that occurred within that range, along with the last block included in the sync and the current chain tip.
 
 This endpoint enables clients to maintain an updated view of account storage.
+
+### SyncTransactions
+
+Returns transaction records for specific accounts within a block range.
 
 ### Status
 

@@ -12,15 +12,68 @@ make install-network-monitor
 
 ## Configuration
 
-The monitor application uses environment variables for configuration:
+The monitor application supports configuration through both command-line arguments and environment variables. Command-line arguments take precedence over environment variables.
 
-- `MIDEN_MONITOR_RPC_URL`: RPC service URL (default: `http://localhost:50051`)
-- `MIDEN_MONITOR_REMOTE_PROVER_URLS`: Comma-separated list of remote prover URLs (default: `http://localhost:50052`)
-- `MIDEN_MONITOR_FAUCET_URL`: Faucet service URL for testing (default: `http://localhost:8080`)
-- `MIDEN_MONITOR_PORT`: Web server port (default: `3000`)
-- `MIDEN_MONITOR_ENABLE_OTEL`: Enable OpenTelemetry tracing (default: `false`)
+### Command-line Arguments
+
+```bash
+# View all available options
+miden-network-monitor --help
+
+# Common usage examples
+miden-network-monitor --port 8080 --rpc-url http://localhost:50051
+miden-network-monitor --remote-prover-urls http://prover1.com:50052,http://prover2.com:50053
+miden-network-monitor --faucet-url http://localhost:8080 --enable-otel
+```
+
+**Available Options:**
+- `--rpc-url`: RPC service URL (default: `http://localhost:50051`)
+- `--remote-prover-urls`: Comma-separated list of remote prover URLs (default: `http://localhost:50052`)
+- `--faucet-url`: Faucet service URL for testing (default: `http://localhost:8080`)
+- `--remote-prover-test-interval`: Interval at which to test the remote provers services (default: `2m`)
+- `--faucet-test-interval`: Interval at which to test the faucet services (default: `2m`)
+- `--status-check-interval`: Interval at which to check the status of the services (default: `3s`)
+- `--port, -p`: Web server port (default: `3000`)
+- `--enable-otel`: Enable OpenTelemetry tracing
+- `--help, -h`: Show help information
+- `--version, -V`: Show version information
+
+### Environment Variables
+
+If command-line arguments are not provided, the application falls back to environment variables:
+
+- `MIDEN_MONITOR_RPC_URL`: RPC service URL
+- `MIDEN_MONITOR_REMOTE_PROVER_URLS`: Comma-separated list of remote prover URLs
+- `MIDEN_MONITOR_FAUCET_URL`: Faucet service URL for testing
+- `MIDEN_MONITOR_REMOTE_PROVER_TEST_INTERVAL`: Interval at which to test the remote provers services
+- `MIDEN_MONITOR_FAUCET_TEST_INTERVAL`: Interval at which to test the faucet services
+- `MIDEN_MONITOR_STATUS_CHECK_INTERVAL`: Interval at which to check the status of the services
+- `MIDEN_MONITOR_PORT`: Web server port
+- `MIDEN_MONITOR_ENABLE_OTEL`: Enable OpenTelemetry tracing
 
 ## Usage
+
+### Using Command-line Arguments
+
+```bash
+# Single remote prover
+miden-network-monitor --remote-prover-urls http://localhost:50052
+
+# Multiple remote provers and custom configuration
+miden-network-monitor \
+  --remote-prover-urls http://localhost:50052,http://localhost:50053,http://localhost:50054 \
+  --faucet-url http://localhost:8080 \
+  --remote-prover-test-interval 2m \
+  --faucet-test-interval 2m \
+  --status-check-interval 3s \
+  --port 8080 \
+  --enable-otel
+
+# Get help
+miden-network-monitor --help
+```
+
+### Using Environment Variables
 
 ```bash
 # Single remote prover
