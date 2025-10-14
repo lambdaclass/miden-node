@@ -233,12 +233,7 @@ fn duplicate_nullifiers_are_rejected() {
     let result = uut.add_transaction(tx_b);
 
     // We overlap with one nullifier.
-    assert_matches!(
-        result,
-        Err(AddTransactionError::VerificationFailed(
-            crate::errors::VerifyTxError::InputNotesAlreadyConsumed { .. }
-        ))
-    );
+    assert_matches!(result, Err(AddTransactionError::InputNotesAlreadyConsumed(..)));
 }
 
 #[test]
@@ -268,12 +263,7 @@ fn duplicate_output_notes_are_rejected() {
     uut.add_transaction(tx_a).unwrap();
     let result = uut.add_transaction(tx_b);
 
-    assert_matches!(
-        result,
-        Err(AddTransactionError::VerificationFailed(
-            crate::errors::VerifyTxError::OutputNotesAlreadyExist { .. }
-        ))
-    );
+    assert_matches!(result, Err(AddTransactionError::OutputNotesAlreadyExist(..)));
 }
 
 #[test]
@@ -303,12 +293,7 @@ fn unknown_unauthenticated_notes_are_rejected() {
     uut.add_transaction(tx_a).unwrap();
     let result = uut.add_transaction(tx_b);
 
-    assert_matches!(
-        result,
-        Err(AddTransactionError::VerificationFailed(
-            crate::errors::VerifyTxError::UnauthenticatedNotesNotFound { .. }
-        ))
-    );
+    assert_matches!(result, Err(AddTransactionError::UnauthenticatedNotesNotFound(..)));
 }
 
 mod account_state {
@@ -405,12 +390,7 @@ mod account_state {
         uut.add_transaction(tx_a).unwrap();
         let result = uut.add_transaction(tx_b);
 
-        assert_matches!(
-            result,
-            Err(AddTransactionError::VerificationFailed(
-                crate::errors::VerifyTxError::IncorrectAccountInitialCommitment { .. }
-            ))
-        );
+        assert_matches!(result, Err(AddTransactionError::IncorrectAccountInitialCommitment { .. }));
     }
 
     /// Ensures that store state is checked if there is no local mempool state.
@@ -435,12 +415,7 @@ mod account_state {
         let tx = Arc::new(tx);
 
         let result = uut.add_transaction(tx);
-        assert_matches!(
-            result,
-            Err(AddTransactionError::VerificationFailed(
-                crate::errors::VerifyTxError::IncorrectAccountInitialCommitment { .. }
-            ))
-        );
+        assert_matches!(result, Err(AddTransactionError::IncorrectAccountInitialCommitment { .. }));
     }
 }
 
@@ -484,12 +459,7 @@ mod new_account {
         ]));
         let tx = Arc::new(tx);
         let result = uut.add_transaction(tx);
-        assert_matches!(
-            result,
-            Err(AddTransactionError::VerificationFailed(
-                crate::errors::VerifyTxError::IncorrectAccountInitialCommitment { .. }
-            ))
-        );
+        assert_matches!(result, Err(AddTransactionError::IncorrectAccountInitialCommitment { .. }));
     }
 
     #[test]
@@ -510,11 +480,6 @@ mod new_account {
         uut.add_transaction(tx.clone()).unwrap();
 
         let result = uut.add_transaction(tx);
-        assert_matches!(
-            result,
-            Err(AddTransactionError::VerificationFailed(
-                crate::errors::VerifyTxError::IncorrectAccountInitialCommitment { .. }
-            ))
-        );
+        assert_matches!(result, Err(AddTransactionError::IncorrectAccountInitialCommitment { .. }));
     }
 }
