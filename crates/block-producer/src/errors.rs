@@ -1,8 +1,5 @@
 use miden_block_prover::ProvenBlockError;
-use miden_node_proto::errors::ConversionError;
-use miden_node_proto::generated::errors::SubmitProvenTransactionError;
-use miden_node_utils::ErrorReport;
-use miden_node_utils::formatting::format_opt;
+use miden_node_proto::errors::{ConversionError, GrpcError};
 use miden_objects::account::AccountId;
 use miden_objects::block::BlockNumber;
 use miden_objects::note::{NoteId, Nullifier};
@@ -55,10 +52,12 @@ pub enum VerifyTxError {
     OutputNotesAlreadyExist(Vec<NoteId>),
 
     /// The account's initial commitment did not match the current account's commitment
-    #[error("transaction's initial state commitment {tx_initial_account_commitment} does not match the account's current value of {}", format_opt(.current_account_commitment.as_ref()))]
+    #[error(
+        "transaction's initial state commitment {tx_initial_account_commitment} does not match the account's current value of {current_account_commitment}"
+    )]
     IncorrectAccountInitialCommitment {
         tx_initial_account_commitment: Word,
-        current_account_commitment: Option<Word>,
+        current_account_commitment: Word,
     },
 
     /// Failed to retrieve transaction inputs from the store
@@ -76,14 +75,40 @@ pub enum VerifyTxError {
 // Transaction adding errors
 // =================================================================================================
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, GrpcError)]
 pub enum AddTransactionError {
-    #[error("transaction verification failed")]
-    VerificationFailed(#[from] VerifyTxError),
+    #[error(
+        "input notes with given nullifiers were already consumed by another transaction: {0:?}"
+    )]
+    InputNotesAlreadyConsumed(Vec<Nullifier>),
+
+    #[error(
+        "unauthenticated transaction notes were not found in the store or in outputs of in-flight transactions: {0:?}"
+    )]
+    UnauthenticatedNotesNotFound(Vec<NoteId>),
+
+    #[error("output note IDs already used: {0:?}")]
+    OutputNotesAlreadyExist(Vec<NoteId>),
+
+    #[error(
+        "transaction's initial state commitment {tx_initial_account_commitment} does not match the account's current value of {current_account_commitment}"
+    )]
+    IncorrectAccountInitialCommitment {
+        tx_initial_account_commitment: Word,
+        current_account_commitment: Word,
+    },
+
+    #[error("failed to retrieve transaction inputs from the store")]
+    #[grpc(internal)]
+    StoreConnectionFailed(#[from] StoreError),
+
+    #[error("invalid transaction proof error for transaction: {0}")]
+    InvalidTransactionProof(TransactionId),
 
     #[error(
         "transaction input data from block {input_block} is rejected as stale because it is older than the limit of {stale_limit}"
     )]
+    #[grpc(internal)]
     StaleInputs {
         input_block: BlockNumber,
         stale_limit: BlockNumber,
@@ -101,77 +126,41 @@ pub enum AddTransactionError {
     },
 }
 
-// Error codes for gRPC Status::details
-// =================================================================================================
-
-impl AddTransactionError {
-    fn api_error(&self) -> SubmitProvenTransactionError {
-        match self {
-            AddTransactionError::VerificationFailed(tx_verify_error) => match tx_verify_error {
-                VerifyTxError::InputNotesAlreadyConsumed(_) => {
-                    SubmitProvenTransactionError::InputNotesAlreadyConsumed
-                },
-                VerifyTxError::StoreConnectionFailed(_) => {
-                    SubmitProvenTransactionError::InternalError
-                },
-                VerifyTxError::UnauthenticatedNotesNotFound(_) => {
-                    SubmitProvenTransactionError::UnauthenticatedNotesNotFound
-                },
-                VerifyTxError::OutputNotesAlreadyExist(_) => {
-                    SubmitProvenTransactionError::OutputNotesAlreadyExist
-                },
-                VerifyTxError::IncorrectAccountInitialCommitment { .. } => {
-                    SubmitProvenTransactionError::IncorrectAccountInitialCommitment
-                },
-                VerifyTxError::InvalidTransactionProof(_) => {
-                    SubmitProvenTransactionError::InvalidTransactionProof
-                },
+impl From<VerifyTxError> for AddTransactionError {
+    fn from(err: VerifyTxError) -> Self {
+        match err {
+            VerifyTxError::InputNotesAlreadyConsumed(nullifiers) => {
+                Self::InputNotesAlreadyConsumed(nullifiers)
             },
-            AddTransactionError::StaleInputs { .. } => SubmitProvenTransactionError::InternalError,
-            AddTransactionError::Expired { .. } => SubmitProvenTransactionError::TransactionExpired,
-            AddTransactionError::TransactionDeserializationFailed(_) => {
-                SubmitProvenTransactionError::DeserializationFailed
+            VerifyTxError::UnauthenticatedNotesNotFound(note_ids) => {
+                Self::UnauthenticatedNotesNotFound(note_ids)
             },
+            VerifyTxError::OutputNotesAlreadyExist(note_ids) => {
+                Self::OutputNotesAlreadyExist(note_ids)
+            },
+            VerifyTxError::IncorrectAccountInitialCommitment {
+                tx_initial_account_commitment,
+                current_account_commitment,
+            } => Self::IncorrectAccountInitialCommitment {
+                tx_initial_account_commitment,
+                current_account_commitment,
+            },
+            VerifyTxError::StoreConnectionFailed(store_err) => {
+                Self::StoreConnectionFailed(store_err)
+            },
+            VerifyTxError::InvalidTransactionProof(tx_id) => Self::InvalidTransactionProof(tx_id),
         }
-    }
-}
-
-impl From<AddTransactionError> for tonic::Status {
-    fn from(value: AddTransactionError) -> Self {
-        let api_error = value.api_error();
-
-        let message = if api_error.is_internal() {
-            "Internal error".to_owned()
-        } else {
-            value.as_report()
-        };
-
-        tonic::Status::with_details(
-            api_error.tonic_code(),
-            message,
-            // Details are serialized as a single byte containing the error code value.
-            // Clients can decode this by reading the first byte of the details field.
-            // Example: details[0] will contain the SubmitProvenTransactionError enum value (0-8)
-            vec![api_error.api_code()].into(),
-        )
     }
 }
 
 // Submit proven batch by user errors
 // =================================================================================================
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, GrpcError)]
+#[grpc(internal)]
 pub enum SubmitProvenBatchError {
     #[error("batch deserialization failed")]
     Deserialization(#[source] miden_objects::utils::DeserializationError),
-}
-
-impl From<SubmitProvenBatchError> for tonic::Status {
-    fn from(value: SubmitProvenBatchError) -> Self {
-        match value {
-            SubmitProvenBatchError::Deserialization(_) => Self::invalid_argument(value.as_report()),
-        }
-    }
 }
 
 // Batch building errors
@@ -236,7 +225,7 @@ pub enum StoreError {
     #[error("account Id prefix already exists: {0}")]
     DuplicateAccountIdPrefix(AccountId),
     #[error("gRPC client error")]
-    GrpcClientError(Box<tonic::Status>),
+    GrpcClientError(#[from] Box<tonic::Status>),
     #[error("malformed response from store: {0}")]
     MalformedResponse(String),
     #[error("failed to parse response")]

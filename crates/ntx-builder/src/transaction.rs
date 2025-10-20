@@ -6,12 +6,14 @@ use miden_objects::asset::AssetWitness;
 use miden_objects::block::{BlockHeader, BlockNumber};
 use miden_objects::note::Note;
 use miden_objects::transaction::{
+    AccountInputs,
     ExecutedTransaction,
     InputNote,
     InputNotes,
     PartialBlockchain,
     ProvenTransaction,
     TransactionArgs,
+    TransactionInputs,
 };
 use miden_objects::vm::FutureMaybeSend;
 use miden_objects::{TransactionInputError, Word};
@@ -121,7 +123,7 @@ impl NtxContext {
                 let notes = notes.into_iter().map(Note::from).collect::<Vec<_>>();
                 let (successful, failed) = self.filter_notes(&data_store, notes).await?;
                 let executed = Box::pin(self.execute(&data_store, successful)).await?;
-                let proven = Box::pin(self.prove(executed)).await?;
+                let proven = Box::pin(self.prove(executed.into())).await?;
                 self.submit(proven).await?;
                 Ok(failed)
             }
@@ -206,11 +208,11 @@ impl NtxContext {
     /// Delegates the transaction proof to the remote prover if configured, otherwise performs the
     /// proof locally.
     #[instrument(target = COMPONENT, name = "ntx.execute_transaction.prove", skip_all, err)]
-    async fn prove(&self, tx: ExecutedTransaction) -> NtxResult<ProvenTransaction> {
+    async fn prove(&self, tx_inputs: TransactionInputs) -> NtxResult<ProvenTransaction> {
         if let Some(remote) = &self.prover {
-            remote.prove(tx.into()).await
+            remote.prove(tx_inputs).await
         } else {
-            tokio::task::spawn_blocking(move || LocalTransactionProver::default().prove(tx.into()))
+            tokio::task::spawn_blocking(move || LocalTransactionProver::default().prove(tx_inputs))
                 .await
                 .map_err(NtxError::Panic)?
         }
@@ -260,9 +262,8 @@ impl DataStore for NtxDataStore {
         &self,
         account_id: AccountId,
         ref_blocks: BTreeSet<BlockNumber>,
-    ) -> impl FutureMaybeSend<
-        Result<(PartialAccount, Option<Word>, BlockHeader, PartialBlockchain), DataStoreError>,
-    > {
+    ) -> impl FutureMaybeSend<Result<(PartialAccount, BlockHeader, PartialBlockchain), DataStoreError>>
+    {
         let account = self.account.clone();
         async move {
             if account.id() != account_id {
@@ -276,8 +277,18 @@ impl DataStore for NtxDataStore {
                 None => return Err(DataStoreError::other("no reference block requested")),
             }
 
-            Ok((account.into(), None, self.reference_header.clone(), self.chain_mmr.clone()))
+            let partial_account = PartialAccount::from(&account);
+
+            Ok((partial_account, self.reference_header.clone(), self.chain_mmr.clone()))
         }
+    }
+
+    fn get_foreign_account_inputs(
+        &self,
+        foreign_account_id: AccountId,
+        _ref_block: BlockNumber,
+    ) -> impl FutureMaybeSend<Result<AccountInputs, DataStoreError>> {
+        async move { Err(DataStoreError::AccountNotFound(foreign_account_id)) }
     }
 
     fn get_vault_asset_witness(
@@ -299,7 +310,7 @@ impl DataStore for NtxDataStore {
                 });
             }
 
-            AssetWitness::new(account.vault().asset_tree().open(&vault_key)).map_err(|err| {
+            AssetWitness::new(account.vault().open(vault_key).into()).map_err(|err| {
                 DataStoreError::Other {
                     error_msg: "failed to open vault asset tree".into(),
                     source: Some(Box::new(err)),
@@ -338,6 +349,14 @@ impl DataStore for NtxDataStore {
                 })
             }
         }
+    }
+
+    fn get_note_script(
+        &self,
+        script_root: Word,
+    ) -> impl FutureMaybeSend<Result<miden_objects::note::NoteScript, DataStoreError>> {
+        // TODO: Add implementation for getting note script from NtxDataStore.
+        async move { Err(DataStoreError::NoteScriptNotFound(script_root)) }
     }
 }
 
