@@ -180,6 +180,9 @@ impl StoreCommand {
         // Write the accounts to disk
         for item in secrets.as_account_files(&genesis_state) {
             let AccountFileWithName { account_file, name } = item?;
+            fs_err::create_dir(accounts_directory).with_context(|| {
+                format!("failed to create accounts_directory at {}", accounts_directory.display())
+            })?;
             let accountpath = accounts_directory.join(name);
             // do not override existing keys
             fs_err::OpenOptions::new()
@@ -190,6 +193,9 @@ impl StoreCommand {
             account_file.write(accountpath)?;
         }
 
+        fs_err::create_dir(data_directory).with_context(|| {
+            format!("failed to create data_directory at {}", data_directory.display())
+        })?;
         Store::bootstrap(genesis_state, data_directory)
     }
 }
