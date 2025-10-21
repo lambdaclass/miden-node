@@ -177,12 +177,32 @@ impl StoreCommand {
             .unwrap_or_default();
 
         let (genesis_state, secrets) = config.into_state()?;
+
+        // Create directories if they do not already exist.
+        for directory in &[accounts_directory, data_directory] {
+            if directory.exists() {
+                let is_empty = directory.read_dir()?.next().is_none();
+                // If the directory exists and is empty, we store the files there
+                if !is_empty {
+                    anyhow::bail!(format!("{} exists but it is not empty.", directory.display()));
+                }
+            } else {
+                fs_err::create_dir(directory).with_context(|| {
+                    format!(
+                        "failed to create {} at {}",
+                        directory
+                            .file_name()
+                            .unwrap_or(std::ffi::OsStr::new("directory"))
+                            .display(),
+                        accounts_directory.display()
+                    )
+                })?;
+            }
+        }
+
         // Write the accounts to disk
         for item in secrets.as_account_files(&genesis_state) {
             let AccountFileWithName { account_file, name } = item?;
-            fs_err::create_dir(accounts_directory).with_context(|| {
-                format!("failed to create accounts_directory at {}", accounts_directory.display())
-            })?;
             let accountpath = accounts_directory.join(name);
             // do not override existing keys
             fs_err::OpenOptions::new()
@@ -193,9 +213,6 @@ impl StoreCommand {
             account_file.write(accountpath)?;
         }
 
-        fs_err::create_dir(data_directory).with_context(|| {
-            format!("failed to create data_directory at {}", data_directory.display())
-        })?;
         Store::bootstrap(genesis_state, data_directory)
     }
 }
