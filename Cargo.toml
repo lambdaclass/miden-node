@@ -47,12 +47,12 @@ miden-node-utils            = { path = "crates/utils", version = "0.12" }
 miden-remote-prover-client  = { path = "crates/remote-prover-client", version = "0.12" }
 
 # miden-base aka protocol dependencies. These should be updated in sync.
-miden-block-prover    = { branch = "next", git = "https://github.com/0xMiden/miden-base" }
-miden-lib             = { branch = "next", git = "https://github.com/0xMiden/miden-base" }
-miden-objects         = { branch = "next", default-features = false, git = "https://github.com/0xMiden/miden-base" }
-miden-testing         = { branch = "next", git = "https://github.com/0xMiden/miden-base" }
-miden-tx              = { branch = "next", default-features = false, git = "https://github.com/0xMiden/miden-base" }
-miden-tx-batch-prover = { branch = "next", git = "https://github.com/0xMiden/miden-base" }
+miden-block-prover    = { branch = "fabrizioorsi/re-export-Section", git = "https://github.com/lambdaclass/miden-base" }
+miden-lib             = { branch = "fabrizioorsi/re-export-Section", git = "https://github.com/lambdaclass/miden-base" }
+miden-objects         = { branch = "fabrizioorsi/re-export-Section", default-features = false, git = "https://github.com/lambdaclass/miden-base" }
+miden-testing         = { branch = "fabrizioorsi/re-export-Section", git = "https://github.com/lambdaclass/miden-base" }
+miden-tx              = { branch = "fabrizioorsi/re-export-Section", default-features = false, git = "https://github.com/lambdaclass/miden-base" }
+miden-tx-batch-prover = { branch = "fabrizioorsi/re-export-Section", git = "https://github.com/lambdaclass/miden-base" }
 
 # Other miden dependencies. These should align with those expected by miden-base.
 miden-air = { features = ["std", "testing"], version = "0.18" }
