@@ -194,7 +194,7 @@ impl StoreCommand {
                             .file_name()
                             .unwrap_or(std::ffi::OsStr::new("directory"))
                             .display(),
-                        accounts_directory.display()
+                        directory.display()
                     )
                 })?;
             }
