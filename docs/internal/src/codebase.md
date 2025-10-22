@@ -25,4 +25,4 @@ instead simply serve to enforce code organisation and decoupling.
 > [!NOTE] > [`miden-base`](https://github.com/0xMiden/miden-base) is an important dependency which
 > contains the core Miden protocol definitions e.g. accounts, notes, transactions etc.
 
-[![workspace dependency tree](../../external/src/img/workspace_tree.svg)](../../external/src/img/workspace_tree.svg)
+[![workspace dependency tree](assets/workspace_tree.svg)](assets/workspace_tree.svg)
