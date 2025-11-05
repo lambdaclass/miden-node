@@ -22,7 +22,7 @@
 - Implement `DataStore::get_note_script()` for `NtxDataStore` (#[1332](https://github.com/0xMiden/miden-node/pull/1332)).
 - [BREAKING] Added `AccountTreeWithHistory` and integrate historical queries into `GetAccountProof` ([#1292](https://github.com/0xMiden/miden-node/pull/1292)).
 
-## v0.11.4 (TBD)
+## v0.11.4 (2025-11-06)
 
 - Reduced note retries to 1 ([#1308](https://github.com/0xMiden/miden-node/pull/1308)).
 - Address network transaction builder (NTX) invariant breaking for unavailable accounts ([#1312](https://github.com/0xMiden/miden-node/pull/1312)).
