@@ -37,6 +37,7 @@ tracing                = { workspace = true }
 url                    = { workspace = true }
 
 [dev-dependencies]
+miden-lib        = { workspace = true }
 miden-node-store = { workspace = true }
 miden-node-utils = { features = ["tracing-forest"], workspace = true }
 miden-objects    = { default-features = true, features = ["testing"], workspace = true }

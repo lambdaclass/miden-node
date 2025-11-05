@@ -209,6 +209,8 @@ pub enum GenesisError {
     GenesisFileDeserialization(#[from] DeserializationError),
     #[error("fee cannot be created")]
     Fee(#[from] FeeError),
+    #[error("failed to build account delta from account")]
+    AccountDelta(AccountError),
 }
 
 // ENDPOINT ERRORS

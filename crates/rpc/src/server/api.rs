@@ -22,7 +22,6 @@ use miden_node_utils::limiter::{
     QueryParamNullifierLimit,
 };
 use miden_objects::account::AccountId;
-use miden_objects::account::delta::AccountUpdateDetails;
 use miden_objects::batch::ProvenBatch;
 use miden_objects::block::{BlockHeader, BlockNumber};
 use miden_objects::note::{Note, NoteRecipient, NoteScript};
@@ -372,20 +371,6 @@ impl api_server::Api for RpcService {
             return Err(Status::invalid_argument(
                 "Network transactions may not be submitted by users yet",
             ));
-        }
-
-        // Compare the account delta commitment of the ProvenTransaction with the actual delta
-        let delta_commitment = tx.account_update().account_delta_commitment();
-
-        // Verify that the delta commitment matches the actual delta
-        if let AccountUpdateDetails::Delta(delta) = tx.account_update().details() {
-            let computed_commitment = delta.to_commitment();
-
-            if computed_commitment != delta_commitment {
-                return Err(Status::invalid_argument(
-                    "Account delta commitment does not match the actual account delta",
-                ));
-            }
         }
 
         let tx_verifier = TransactionVerifier::new(MIN_PROOF_SECURITY_LEVEL);

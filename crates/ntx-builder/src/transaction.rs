@@ -4,7 +4,7 @@ use std::sync::Arc;
 use lru::LruCache;
 use miden_node_utils::tracing::OpenTelemetrySpanExt;
 use miden_objects::account::{Account, AccountId, PartialAccount, StorageMapWitness, StorageSlot};
-use miden_objects::asset::{AssetWitness, VaultKey};
+use miden_objects::asset::{AssetVaultKey, AssetWitness};
 use miden_objects::block::{BlockHeader, BlockNumber};
 use miden_objects::note::{Note, NoteScript};
 use miden_objects::transaction::{
@@ -327,7 +327,7 @@ impl DataStore for NtxDataStore {
         &self,
         account_id: AccountId,
         vault_root: Word,
-        vault_key: VaultKey,
+        vault_key: AssetVaultKey,
     ) -> impl FutureMaybeSend<Result<AssetWitness, DataStoreError>> {
         async move {
             if self.account.id() != account_id {
