@@ -22,19 +22,24 @@ use miden_node_utils::limiter::{
     QueryParamNullifierLimit,
 };
 use miden_objects::account::AccountId;
-use miden_objects::account::delta::AccountUpdateDetails;
 use miden_objects::batch::ProvenBatch;
 use miden_objects::block::{BlockHeader, BlockNumber};
 use miden_objects::note::{Note, NoteRecipient, NoteScript};
-use miden_objects::transaction::{OutputNote, ProvenTransaction, ProvenTransactionBuilder};
+use miden_objects::transaction::{
+    OutputNote,
+    ProvenTransaction,
+    ProvenTransactionBuilder,
+    TransactionInputs,
+};
 use miden_objects::utils::serde::{Deserializable, Serializable};
-use miden_objects::{MAX_NUM_FOREIGN_ACCOUNTS, MIN_PROOF_SECURITY_LEVEL, Word};
+use miden_objects::{MIN_PROOF_SECURITY_LEVEL, Word};
 use miden_tx::TransactionVerifier;
 use tonic::{IntoRequest, Request, Response, Status};
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 use url::Url;
 
 use crate::COMPONENT;
+use crate::server::validator;
 
 // RPC SERVICE
 // ================================================================================================
@@ -170,20 +175,20 @@ impl api_server::Api for RpcService {
     #[instrument(
         parent = None,
         target = COMPONENT,
-        name = "rpc.server.check_nullifiers_by_prefix",
+        name = "rpc.server.sync_nullifiers",
         skip_all,
         ret(level = "debug"),
         err
     )]
-    async fn check_nullifiers_by_prefix(
+    async fn sync_nullifiers(
         &self,
-        request: Request<proto::rpc_store::CheckNullifiersByPrefixRequest>,
-    ) -> Result<Response<proto::rpc_store::CheckNullifiersByPrefixResponse>, Status> {
+        request: Request<proto::rpc_store::SyncNullifiersRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncNullifiersResponse>, Status> {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         check::<QueryParamNullifierLimit>(request.get_ref().nullifiers.len())?;
 
-        self.store.clone().check_nullifiers_by_prefix(request).await
+        self.store.clone().sync_nullifiers(request).await
     }
 
     #[instrument(
@@ -368,20 +373,6 @@ impl api_server::Api for RpcService {
             ));
         }
 
-        // Compare the account delta commitment of the ProvenTransaction with the actual delta
-        let delta_commitment = tx.account_update().account_delta_commitment();
-
-        // Verify that the delta commitment matches the actual delta
-        if let AccountUpdateDetails::Delta(delta) = tx.account_update().details() {
-            let computed_commitment = delta.to_commitment();
-
-            if computed_commitment != delta_commitment {
-                return Err(Status::invalid_argument(
-                    "Account delta commitment does not match the actual account delta",
-                ));
-            }
-        }
-
         let tx_verifier = TransactionVerifier::new(MIN_PROOF_SECURITY_LEVEL);
 
         tx_verifier.verify(&tx).map_err(|err| {
@@ -391,6 +382,32 @@ impl api_server::Api for RpcService {
                 err.as_report()
             ))
         })?;
+
+        // If transaction inputs are provided, re-execute the transaction to validate it.
+        if let Some(tx_inputs_bytes) = &request.transaction_inputs {
+            // Deserialize the transaction inputs.
+            let tx_inputs = TransactionInputs::read_from_bytes(tx_inputs_bytes).map_err(|err| {
+                Status::invalid_argument(err.as_report_context("Invalid transaction inputs"))
+            })?;
+            // Re-execute the transaction.
+            match validator::re_execute_transaction(tx_inputs).await {
+                Ok(_executed_tx) => {
+                    debug!(
+                        target = COMPONENT,
+                        tx_id = %tx.id().to_hex(),
+                        "Transaction re-execution successful"
+                    );
+                },
+                Err(e) => {
+                    warn!(
+                        target = COMPONENT,
+                        tx_id = %tx.id().to_hex(),
+                        error = %e,
+                        "Transaction re-execution failed, but continuing with submission"
+                    );
+                },
+            }
+        }
 
         block_producer.clone().submit_proven_transaction(request).await
     }
@@ -500,33 +517,20 @@ impl api_server::Api for RpcService {
     #[instrument(
         parent = None,
         target = COMPONENT,
-        name = "rpc.server.get_account_proofs",
+        name = "rpc.server.get_account_proof",
         skip_all,
         ret(level = "debug"),
         err
     )]
-    async fn get_account_proofs(
+    async fn get_account_proof(
         &self,
-        request: Request<proto::rpc_store::AccountProofsRequest>,
-    ) -> Result<Response<proto::rpc_store::AccountProofs>, Status> {
+        request: Request<proto::rpc_store::AccountProofRequest>,
+    ) -> Result<Response<proto::rpc_store::AccountProofResponse>, Status> {
         let request = request.into_inner();
 
         debug!(target: COMPONENT, ?request);
 
-        if request.account_requests.len() > MAX_NUM_FOREIGN_ACCOUNTS as usize {
-            return Err(Status::invalid_argument(format!(
-                "Too many accounts requested: {}, limit: {MAX_NUM_FOREIGN_ACCOUNTS}",
-                request.account_requests.len()
-            )));
-        }
-
-        if request.account_requests.len() < request.code_commitments.len() {
-            return Err(Status::invalid_argument(
-                "The number of code commitments should not exceed the number of requested accounts.",
-            ));
-        }
-
-        self.store.clone().get_account_proofs(request).await
+        self.store.clone().get_account_proof(request).await
     }
 
     #[instrument(
@@ -571,6 +575,40 @@ impl api_server::Api for RpcService {
             )),
             genesis_commitment: self.genesis_commitment.map(Into::into),
         }))
+    }
+
+    #[instrument(
+        parent = None,
+        target = COMPONENT,
+        name = "rpc.server.get_note_script_by_root",
+        skip_all,
+        ret(level = "debug"),
+        err
+    )]
+    async fn get_note_script_by_root(
+        &self,
+        request: Request<proto::note::NoteRoot>,
+    ) -> Result<Response<proto::shared::MaybeNoteScript>, Status> {
+        debug!(target: COMPONENT, request = ?request);
+
+        self.store.clone().get_note_script_by_root(request).await
+    }
+
+    #[instrument(
+        parent = None,
+        target = COMPONENT,
+        name = "rpc.server.sync_transactions",
+        skip_all,
+        ret(level = "debug"),
+        err
+    )]
+    async fn sync_transactions(
+        &self,
+        request: Request<proto::rpc_store::SyncTransactionsRequest>,
+    ) -> Result<Response<proto::rpc_store::SyncTransactionsResponse>, Status> {
+        debug!(target: COMPONENT, request = ?request);
+
+        self.store.clone().sync_transactions(request).await
     }
 }
 

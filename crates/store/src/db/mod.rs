@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -8,10 +9,17 @@ use miden_node_proto::domain::account::{AccountInfo, AccountSummary, NetworkAcco
 use miden_node_proto::generated as proto;
 use miden_objects::Word;
 use miden_objects::account::AccountId;
-use miden_objects::asset::Asset;
+use miden_objects::asset::{Asset, AssetVaultKey};
 use miden_objects::block::{BlockHeader, BlockNoteIndex, BlockNumber, ProvenBlock};
 use miden_objects::crypto::merkle::SparseMerklePath;
-use miden_objects::note::{NoteDetails, NoteId, NoteInclusionProof, NoteMetadata, Nullifier};
+use miden_objects::note::{
+    NoteDetails,
+    NoteId,
+    NoteInclusionProof,
+    NoteMetadata,
+    NoteScript,
+    Nullifier,
+};
 use miden_objects::transaction::TransactionId;
 use tokio::sync::oneshot;
 use tracing::{info, info_span, instrument};
@@ -49,7 +57,7 @@ pub struct Db {
 #[derive(Debug, Clone)]
 pub struct AccountVaultValue {
     pub block_num: BlockNumber,
-    pub vault_key: Word,
+    pub vault_key: AssetVaultKey,
     /// None if the asset was removed
     pub asset: Option<Asset>,
 }
@@ -57,9 +65,10 @@ pub struct AccountVaultValue {
 impl AccountVaultValue {
     pub fn from_raw_row(row: (i64, Vec<u8>, Option<Vec<u8>>)) -> Result<Self, DatabaseError> {
         let (block_num, vault_key, asset) = row;
+        let vault_key = Word::read_from_bytes(&vault_key)?;
         Ok(Self {
             block_num: BlockNumber::from_raw_sql(block_num)?,
-            vault_key: Word::read_from_bytes(&vault_key)?,
+            vault_key: AssetVaultKey::new_unchecked(vault_key),
             asset: asset.map(|b| Asset::read_from_bytes(&b)).transpose()?,
         })
     }
@@ -84,11 +93,47 @@ pub struct TransactionSummary {
     pub transaction_id: TransactionId,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct TransactionRecord {
+    pub block_num: BlockNumber,
+    pub transaction_id: TransactionId,
+    pub account_id: AccountId,
+    pub initial_state_commitment: Word,
+    pub final_state_commitment: Word,
+    pub input_notes: Vec<Nullifier>, // Store nullifiers for input notes
+    pub output_notes: Vec<NoteId>,   // Store note IDs for output notes
+}
+
+impl TransactionRecord {
+    /// Convert to proto `TransactionRecord`, but requires note sync records for output notes.
+    /// For `sync_transactions` RPC, we need to fetch note sync records separately since we only
+    /// store note IDs in the database.
+    pub fn into_proto_with_note_records(
+        self,
+        note_records: Vec<NoteRecord>,
+    ) -> proto::rpc_store::TransactionRecord {
+        let output_notes: Vec<proto::note::NoteSyncRecord> =
+            note_records.into_iter().map(Into::into).collect();
+
+        proto::rpc_store::TransactionRecord {
+            transaction_header: Some(proto::transaction::TransactionHeader {
+                account_id: Some(self.account_id.into()),
+                initial_state_commitment: Some(self.initial_state_commitment.into()),
+                final_state_commitment: Some(self.final_state_commitment.into()),
+                input_notes: self.input_notes.into_iter().map(From::from).collect(),
+                output_notes,
+            }),
+            block_num: self.block_num.as_u32(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoteRecord {
     pub block_num: BlockNumber,
     pub note_index: BlockNoteIndex,
     pub note_id: Word,
+    pub note_commitment: Word,
     pub metadata: NoteMetadata,
     pub details: Option<NoteDetails>,
     pub inclusion_path: SparseMerklePath,
@@ -107,6 +152,22 @@ impl From<NoteRecord> for proto::note::CommittedNote {
             details: note.details.map(|details| details.to_bytes()),
         });
         Self { inclusion_proof, note }
+    }
+}
+
+impl From<NoteRecord> for proto::note::NoteSyncRecord {
+    fn from(value: NoteRecord) -> Self {
+        let note_id = value.note_id.into();
+        let note_index_in_block = value.note_index.leaf_index_value().into();
+        let metadata = value.metadata.into();
+        let inclusion_path = value.inclusion_path.into();
+
+        proto::note::NoteSyncRecord {
+            note_id: Some(note_id),
+            note_index_in_block,
+            metadata: Some(metadata),
+            inclusion_path: Some(inclusion_path),
+        }
     }
 }
 
@@ -276,8 +337,8 @@ impl Db {
         &self,
         prefix_len: u32,
         nullifier_prefixes: Vec<u32>,
-        block_num: BlockNumber,
-    ) -> Result<Vec<NullifierInfo>> {
+        block_range: RangeInclusive<BlockNumber>,
+    ) -> Result<(Vec<NullifierInfo>, BlockNumber)> {
         assert_eq!(prefix_len, 16, "Only 16-bit prefixes are supported");
 
         self.transact("nullifieres by prefix", move |conn| {
@@ -287,7 +348,7 @@ impl Db {
                 conn,
                 prefix_len as u8,
                 &nullifier_prefixes[..],
-                block_num,
+                block_range,
             )
         })
         .await
@@ -359,18 +420,6 @@ impl Db {
         .await
     }
 
-    /// Loads public accounts details from the DB.
-    #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
-    pub async fn select_accounts_by_ids(
-        &self,
-        account_ids: Vec<AccountId>,
-    ) -> Result<Vec<AccountInfo>> {
-        self.transact("Select account by id set", |conn| {
-            queries::select_accounts_by_id(conn, account_ids)
-        })
-        .await
-    }
-
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
     pub async fn get_state_sync(
         &self,
@@ -387,11 +436,11 @@ impl Db {
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
     pub async fn get_note_sync(
         &self,
-        block_num: BlockNumber,
+        block_range: RangeInclusive<BlockNumber>,
         note_tags: Vec<u32>,
-    ) -> Result<NoteSyncUpdate, NoteSyncError> {
+    ) -> Result<(NoteSyncUpdate, BlockNumber), NoteSyncError> {
         self.transact("notes sync task", move |conn| {
-            queries::get_note_sync(conn, block_num, note_tags.as_slice())
+            queries::get_note_sync(conn, note_tags.as_slice(), block_range)
         })
         .await
     }
@@ -406,24 +455,29 @@ impl Db {
         .await
     }
 
-    /// Loads inclusion proofs for notes matching the given IDs.
+    /// Loads all the [`NoteRecord`]s matching a certain note commitment from the
+    /// database.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
-    pub async fn select_note_inclusion_proofs(
+    pub async fn select_notes_by_commitment(
         &self,
-        note_ids: BTreeSet<NoteId>,
-    ) -> Result<BTreeMap<NoteId, NoteInclusionProof>> {
-        self.transact("block note inclusion proofs", move |conn| {
-            models::queries::select_note_inclusion_proofs(conn, &note_ids)
+        note_commitments: Vec<Word>,
+    ) -> Result<Vec<NoteRecord>> {
+        self.transact("note by commitment", move |conn| {
+            queries::select_notes_by_commitment(conn, note_commitments.as_slice())
         })
         .await
     }
 
-    /// Loads all note IDs matching a certain [`NoteId`] from the database.
+    /// Loads inclusion proofs for notes matching the given note commitments.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
-    pub async fn select_note_ids(&self, note_ids: Vec<NoteId>) -> Result<HashSet<NoteId>> {
-        self.select_notes_by_id(note_ids)
-            .await
-            .map(|notes| notes.into_iter().map(|note| note.note_id.into()).collect())
+    pub async fn select_note_inclusion_proofs(
+        &self,
+        note_commitments: BTreeSet<Word>,
+    ) -> Result<BTreeMap<NoteId, NoteInclusionProof>> {
+        self.transact("block note inclusion proofs by commitment", move |conn| {
+            models::queries::select_note_inclusion_proofs(conn, &note_commitments)
+        })
+        .await
     }
 
     /// Inserts the data of a new block into the DB.
@@ -467,18 +521,15 @@ impl Db {
 
     /// Selects storage map values for syncing storage maps for a specific account ID.
     ///
-    /// The returned values are the latest known values up to `block_to`, and no values earlier
-    /// than `block_from` are returned.
+    /// The returned values are the latest known values up to `block_range.end()`, and no values
+    /// earlier than `block_range.start()` are returned.
     pub(crate) async fn select_storage_map_sync_values(
         &self,
         account_id: AccountId,
-        block_from: BlockNumber,
-        block_to: BlockNumber,
+        block_range: RangeInclusive<BlockNumber>,
     ) -> Result<StorageMapValuesPage> {
         self.transact("select storage map sync values", move |conn| {
-            models::queries::select_account_storage_map_values(
-                conn, account_id, block_from, block_to,
-            )
+            models::queries::select_account_storage_map_values(conn, account_id, block_range)
         })
         .await
     }
@@ -532,11 +583,35 @@ impl Db {
     pub async fn get_account_vault_sync(
         &self,
         account_id: AccountId,
-        block_from: BlockNumber,
-        block_to: BlockNumber,
+        block_range: RangeInclusive<BlockNumber>,
     ) -> Result<(BlockNumber, Vec<AccountVaultValue>)> {
         self.transact("account vault sync", move |conn| {
-            queries::select_account_vault_assets(conn, account_id, block_from, block_to)
+            queries::select_account_vault_assets(conn, account_id, block_range)
+        })
+        .await
+    }
+
+    /// Returns the script for a note by its root.
+    pub async fn select_note_script_by_root(&self, root: Word) -> Result<Option<NoteScript>> {
+        self.transact("note script by root", move |conn| {
+            queries::select_note_script_by_root(conn, root)
+        })
+        .await
+    }
+
+    /// Returns the complete transaction records for the specified accounts within the specified
+    /// block range, including state commitments and note IDs.
+    ///
+    /// Note: This method is size-limited (~5MB) and may not return all matching transactions
+    /// if the limit is exceeded. Transactions from partial blocks are excluded to maintain
+    /// consistency.
+    pub async fn select_transactions_records(
+        &self,
+        account_ids: Vec<AccountId>,
+        block_range: RangeInclusive<BlockNumber>,
+    ) -> Result<(BlockNumber, Vec<TransactionRecord>)> {
+        self.transact("full transactions records", move |conn| {
+            queries::select_transactions_records(conn, &account_ids, block_range)
         })
         .await
     }

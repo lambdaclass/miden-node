@@ -23,16 +23,11 @@ service Rpc {
     // Returns a nullifier proof for each of the requested nullifiers.
     rpc CheckNullifiers(NullifierList) returns (CheckNullifiersResponse) {}
 
-    // Returns a list of nullifiers that match the specified prefixes and are recorded in the node.
-    //
-    // Note that only 16-bit prefixes are supported at this time.
-    rpc CheckNullifiersByPrefix(CheckNullifiersByPrefixRequest) returns (CheckNullifiersByPrefixResponse) {}
-
     // Returns the latest state of an account with the specified ID.
     rpc GetAccountDetails(account.AccountId) returns (account.AccountDetails) {}
 
-    // Returns the latest state proofs of the specified accounts.
-    rpc GetAccountProofs(AccountProofsRequest) returns (AccountProofs) {}
+    // Returns the latest state proof of the specified account.
+    rpc GetAccountProof(AccountProofRequest) returns (AccountProofResponse) {}
 
     // Returns raw block data for the specified block number.
     rpc GetBlockByNumber(blockchain.BlockNumber) returns (blockchain.MaybeBlock) {}
@@ -44,9 +39,17 @@ service Rpc {
     // Returns a list of committed notes matching the provided note IDs.
     rpc GetNotesById(note.NoteIdList) returns (note.CommittedNoteList) {}
 
-    // Returns info which can be used by the client to sync up to the tip of chain for the notes they are interested in.
+    // Returns the script for a note by its root.
+    rpc GetNoteScriptByRoot(note.NoteRoot) returns (shared.MaybeNoteScript) {}
+
+    // Returns a list of nullifiers that match the specified prefixes and are recorded in the node.
     //
-    // Client specifies the `note_tags` they are interested in, and the block height from which to search for new for
+    // Note that only 16-bit prefixes are supported at this time.
+    rpc SyncNullifiers(SyncNullifiersRequest) returns (SyncNullifiersResponse) {}
+
+    // Returns info which can be used by the requester to sync up to the tip of chain for the notes they are interested in.
+    //
+    // requester specifies the `note_tags` they are interested in, and the block height from which to search for new for
     // matching notes for. The request will then return the next block containing any note matching the provided tags.
     //
     // The response includes each note's metadata and inclusion proof.
@@ -55,20 +58,20 @@ service Rpc {
     // tip of the chain.
     rpc SyncNotes(SyncNotesRequest) returns (SyncNotesResponse) {}
 
-    // Returns info which can be used by the client to sync up to the latest state of the chain
-    // for the objects (accounts, notes, nullifiers) the client is interested in.
+    // Returns info which can be used by the requester to sync up to the latest state of the chain
+    // for the objects (accounts, notes, nullifiers) the requester is interested in.
     //
     // This request returns the next block containing requested data. It also returns `chain_tip`
-    // which is the latest block number in the chain. Client is expected to repeat these requests
+    // which is the latest block number in the chain. requester is expected to repeat these requests
     // in a loop until `response.block_header.block_num == response.chain_tip`, at which point
-    // the client is fully synchronized with the chain.
+    // the requester is fully synchronized with the chain.
     //
     // Each request also returns info about new notes, nullifiers etc. created. It also returns
     // Chain MMR delta that can be used to update the state of Chain MMR. This includes both chain
     // MMR peaks and chain MMR nodes.
     //
     // For preserving some degree of privacy, note tags and nullifiers filters contain only high
-    // part of hashes. Thus, returned data contains excessive notes and nullifiers, client can make
+    // part of hashes. Thus, returned data contains excessive notes and nullifiers, requester can make
     // additional filtering of that data on its side.
     rpc SyncState(SyncStateRequest) returns (SyncStateResponse) {}
 
@@ -77,6 +80,9 @@ service Rpc {
 
     // Returns storage map updates for specified account and storage slots within a block range.
     rpc SyncStorageMaps(SyncStorageMapsRequest) returns (SyncStorageMapsResponse) {}
+
+    // Returns transactions records for specific accounts within a block range.
+    rpc SyncTransactions(SyncTransactionsRequest) returns (SyncTransactionsResponse) {}
 }
 
 // STORE STATUS
@@ -94,114 +100,133 @@ message StoreStatus {
     fixed32 chain_tip = 3;
 }
 
-// GET ACCOUNT PROOFS
+// GET ACCOUNT PROOF
 // ================================================================================================
 
-// Returns the latest state proofs of the specified accounts.
-message AccountProofsRequest {
-    // Represents per-account requests where each account ID has its own list of
-    // (storage_slot_index, map_keys) pairs.
-    message AccountRequest {
+// Returns the latest state proof of the specified account.
+message AccountProofRequest {
+    // Request the details for a public account.
+    message AccountDetailRequest {
         // Represents a storage slot index and the associated map keys.
-        message StorageRequest {
-            // Storage slot index ([0..255])
-            uint32 storage_slot_index = 1;
+        message StorageMapDetailRequest {
+            // Indirection required for use in `oneof {..}` block.
+            message MapKeys {
+                // A list of map keys associated with this storage slot.
+                repeated primitives.Digest map_keys = 1;
+            }
+            // Storage slot index (`[0..255]`).
+            uint32 slot_index = 1;
 
-            // A list of map keys (Digests) associated with this storage slot.
-            repeated primitives.Digest map_keys = 2;
+            oneof slot_data {
+                // Request to return all storage map data. If the number exceeds a threshold of 1000 entries,
+                // the response will not contain them but must be requested separately.
+                bool all_entries = 2;
+
+                // A list of map keys associated with the given storage slot identified by `slot_index`.
+                MapKeys map_keys = 3;
+            }
         }
 
-        // The account ID for this request.
-        account.AccountId account_id = 1;
+        // Last known code commitment to the requester. The response will include account code
+        // only if its commitment is different from this value.
+        //
+        // If the field is ommiteed, the response will not include the account code.
+        optional primitives.Digest code_commitment = 1;
 
-        // List of storage requests for this account.
-        repeated StorageRequest storage_requests = 2;
+        // Last known asset vault commitment to the requester. The response will include asset vault data
+        // only if its commitment is different from this value. If the value is not present in the
+        // request, the response will not contain one either.
+        // If the number of to-be-returned asset entries exceed a threshold, they have to be requested
+        // separately, which is signaled in the response message with dedicated flag.
+        optional primitives.Digest asset_vault_commitment = 2;
+
+        // Additional request per storage map.
+        repeated StorageMapDetailRequest storage_maps = 3;
     }
 
-    // A list of account requests, including map keys + values.
-    repeated AccountRequest account_requests = 1;
+    // ID of the account for which we want to get data
+    account.AccountId account_id = 1;
 
-    // Optional flag to include account headers and account code in the response. If false, storage
-    // requests are also ignored. False by default.
-    optional bool include_headers = 2;
+    // Block at which we'd like to get this data. If present, must be close to the chain tip.
+    // If not present, data from the latest block will be returned.
+    optional blockchain.BlockNumber block_num = 2;
 
-    // Account code commitments corresponding to the last-known `AccountCode` for requested
-    // accounts. Responses will include only the ones that are not known to the caller.
-    // These are not associated with a specific account but rather, they will be matched against
-    // all requested accounts.
-    repeated primitives.Digest code_commitments = 3;
+    // Request for additional account details; valid only for public accounts.
+    optional AccountDetailRequest details = 3;
 }
 
-// Represents the result of getting account proofs.
-message AccountProofs {
-    // A single account proof returned as a response to `GetAccountProofs`.
-    message AccountProof {
-        // State header for public accounts.
-        message AccountStateHeader {
-            // Represents a single storage slot with the requested keys and their respective values.
-            message StorageSlotMapProof {
-                // The storage slot index ([0..255]).
-                uint32 storage_slot = 1;
+// Represents the result of getting account proof.
+message AccountProofResponse {
 
-                // Merkle proof of the map value
-                bytes smt_proof = 2;
+    message AccountDetails {
+        // Account header.
+        account.AccountHeader header = 1;
+
+        // Account storage data
+        AccountStorageDetails storage_details = 2;
+
+        // Account code; empty if code commitments matched or none was requested.
+        optional bytes code = 3;
+
+        // Account asset vault data; empty if vault commitments matched or the requester
+        // omitted it in the request.
+        optional AccountVaultDetails vault_details = 4;
+    }
+
+    // The block number at which the account witness was created and the account details were observed.
+    blockchain.BlockNumber block_num = 1;
+
+    // Account ID, current state commitment, and SMT path.
+    account.AccountWitness witness = 2;
+
+    // Additional details for public accounts.
+    optional AccountDetails details = 3;
+}
+
+// Account vault details for AccountProofResponse
+message AccountVaultDetails {
+    // A flag that is set to true if the account contains too many assets. This indicates
+    // to the user that `SyncAccountVault` endpoint should be used to retrieve the
+    // account's assets
+    bool too_many_assets = 1;
+
+    // When too_many_assets == false, this will contain the list of assets in the
+    // account's vault
+    repeated primitives.Asset assets = 2;
+}
+
+// Account storage details for AccountProofResponse
+message AccountStorageDetails {
+    message AccountStorageMapDetails {
+        // Wrapper for repeated storage map entries
+        message MapEntries {
+            // Definition of individual storage entries.
+            message StorageMapEntry {
+                primitives.Digest key = 1;
+                primitives.Digest value = 2;
             }
 
-            // Account header.
-            account.AccountHeader header = 1;
-
-            // Values of all account storage slots (max 255).
-            bytes storage_header = 2;
-
-            // Account code, returned only when none of the request's code commitments match
-            // the current one.
-            optional bytes account_code = 3;
-
-            // Storage slots information for this account
-            repeated StorageSlotMapProof storage_maps = 4;
+            repeated StorageMapEntry entries = 1;
         }
+        // slot index of the storage map
+        uint32 slot_index = 1;
 
-        // The account witness for the current state commitment of one account ID.
-        account.AccountWitness witness = 1;
+        // A flag that is set to `true` if the number of to-be-returned entries in the
+        // storage map would exceed a threshold. This indicates to the user that `SyncStorageMaps`
+        // endpoint should be used to get all storage map data.
+        bool too_many_entries = 2;
 
-        // State header for public accounts. Filled only if `include_headers` flag is set to `true`.
-        optional AccountStateHeader state_header = 2;
+        // By default we provide all storage entries.
+        MapEntries entries = 3;
     }
 
-    // Block number at which the state of the accounts is returned.
-    fixed32 block_num = 1;
+    // Account storage header (storage slot info for up to 256 slots)
+    account.AccountStorageHeader header = 1;
 
-    // List of account state infos for the requested account keys.
-    repeated AccountProof account_proofs = 2;
+    // Additional data for the requested storage maps
+    repeated AccountStorageMapDetails map_details = 2;
 }
 
-// CHECK NULLIFIERS BY PREFIX
-// ================================================================================================
-
-// Returns a list of nullifiers that match the specified prefixes and are recorded in the node.
-message CheckNullifiersByPrefixRequest {
-    // Number of bits used for nullifier prefix. Currently the only supported value is 16.
-    uint32 prefix_len = 1;
-    // List of nullifiers to check. Each nullifier is specified by its prefix with length equal
-    // to `prefix_len`.
-    repeated uint32 nullifiers = 2;
-    // Block number from which the nullifiers are requested (inclusive).
-    fixed32 block_num = 3;
-}
-
-// Represents the result of checking nullifiers by prefix.
-message CheckNullifiersByPrefixResponse {
-    // Represents a single nullifier update.
-    message NullifierUpdate {
-        // Nullifier ID.
-        primitives.Digest nullifier = 1;
-
-        // Block number.
-        fixed32 block_num = 2;
-    }
-    // List of nullifiers matching the prefixes specified in the request.
-    repeated NullifierUpdate nullifiers = 1;
-}
 
 // CHECK NULLIFIERS
 // ================================================================================================
@@ -218,16 +243,50 @@ message CheckNullifiersResponse {
     repeated primitives.SmtOpening proofs = 1;
 }
 
+// SYNC NULLIFIERS
+// ================================================================================================
+
+// Returns a list of nullifiers that match the specified prefixes and are recorded in the node.
+message SyncNullifiersRequest {
+    // Block number from which the nullifiers are requested (inclusive).
+    BlockRange block_range = 1;
+
+    // Number of bits used for nullifier prefix. Currently the only supported value is 16.
+    uint32 prefix_len = 2;
+
+    // List of nullifiers to check. Each nullifier is specified by its prefix with length equal
+    // to `prefix_len`.
+    repeated uint32 nullifiers = 3;
+}
+
+// Represents the result of syncing nullifiers.
+message SyncNullifiersResponse {
+    // Represents a single nullifier update.
+    message NullifierUpdate {
+        // Nullifier ID.
+        primitives.Digest nullifier = 1;
+
+        // Block number.
+        fixed32 block_num = 2;
+    }
+
+    // Pagination information.
+    PaginationInfo pagination_info = 1;
+
+    // List of nullifiers matching the prefixes specified in the request.
+    repeated NullifierUpdate nullifiers = 2;
+}
+
 // SYNC STATE
 // ================================================================================================
 
 // State synchronization request.
 //
-// Specifies state updates the client is interested in. The server will return the first block which
+// Specifies state updates the requester is interested in. The server will return the first block which
 // contains a note matching `note_tags` or the chain tip. And the corresponding updates to
 // `account_ids` for that block range.
 message SyncStateRequest {
-    // Last block known by the client. The response will contain data starting from the next block,
+    // Last block known by the requester. The response will contain data starting from the next block,
     // until the first block which contains a note of matching the requested tag, or the chain tip
     // if there are no notes.
     fixed32 block_num = 1;
@@ -239,7 +298,7 @@ message SyncStateRequest {
     // it won't be included in the response.
     repeated account.AccountId account_ids = 2;
 
-    // Specifies the tags which the client is interested in.
+    // Specifies the tags which the requester is interested in.
     repeated fixed32 note_tags = 3;
 }
 
@@ -270,37 +329,27 @@ message SyncStateResponse {
 
 // Account vault synchronization request.
 //
-// Allows clients to sync asset values for specific public accounts within a block range.
+// Allows requesters to sync asset values for specific public accounts within a block range.
 message SyncAccountVaultRequest {
-    // Block number from which to start synchronizing.
-    fixed32 block_from = 1;
-    
-    /// Block number up to which to sync. If not specified, syncs up to the latest block.
-    ///
-    /// If specified, this block must be close to the chain tip (i.e., within 30 blocks),
-    /// otherwise an error will be returned.
-    optional fixed32 block_to = 2;
-    
+    // Block range from which to start synchronizing.
+    //
+    // If the `block_to` is specified, this block must be close to the chain tip (i.e., within 30 blocks),
+    // otherwise an error will be returned.
+    BlockRange block_range = 1;
+
     // Account for which we want to sync asset vault.
-    account.AccountId account_id = 3;
+    account.AccountId account_id = 2;
 }
 
 message SyncAccountVaultResponse {
-    // The block number of the last update included in this response.
-    //
-    // For chunked responses, this may be less than request.block_to.
-    // If it is less than request.block_to, the user is expected to make a subsequent request 
-    // starting from the next block to this one (ie, request.block_from = block_num + 1).
-    fixed32 block_num = 1;
+    // Pagination information.
+    PaginationInfo pagination_info = 1;
 
-    // Chain tip at the moment of the request.
-    fixed32 chain_tip = 2;
-    
     // List of asset updates for the account.
-    // 
+    //
     // Multiple updates can be returned for a single asset, and the one with a higher `block_num`
     // is expected to be retained by the caller.
-    repeated AccountVaultUpdate updates = 3;
+    repeated AccountVaultUpdate updates = 2;
 }
 
 message AccountVaultUpdate {
@@ -320,21 +369,20 @@ message AccountVaultUpdate {
 
 // Note synchronization request.
 //
-// Specifies note tags that client is interested in. The server will return the first block which
+// Specifies note tags that requester is interested in. The server will return the first block which
 // contains a note matching `note_tags` or the chain tip.
 message SyncNotesRequest {
-    // Last block known by the client. The response will contain data starting from the next block,
-    // until the first block which contains a note of matching the requested tag.
-    fixed32 block_num = 1;
+    // Block range from which to start synchronizing.
+    BlockRange block_range = 1;
 
-    // Specifies the tags which the client is interested in.
+    // Specifies the tags which the requester is interested in.
     repeated fixed32 note_tags = 2;
 }
 
 // Represents the result of syncing notes request.
 message SyncNotesResponse {
-    // Number of the latest block in the chain.
-    fixed32 chain_tip = 1;
+    // Pagination information.
+    PaginationInfo pagination_info = 1;
 
     // Block header of the block with the first note matching the specified criteria.
     blockchain.BlockHeader block_header = 2;
@@ -354,38 +402,28 @@ message SyncNotesResponse {
 
 // Storage map synchronization request.
 //
-// Allows clients to sync storage map values for specific public accounts within a block range,
+// Allows requesters to sync storage map values for specific public accounts within a block range,
 // with support for cursor-based pagination to handle large storage maps.
 message SyncStorageMapsRequest {
-    // Block number to start sending updates from (inclusive).
-    fixed32 block_from = 1;
-
-    // Block number up to which to sync. If not specified, syncs up to the latest block.
+    // Block range from which to start synchronizing.
     //
-    // If specified, this block must be close to the chain tip (i.e., within 30 blocks),
+    // If the `block_to` is specified, this block must be close to the chain tip (i.e., within 30 blocks),
     // otherwise an error will be returned.
-    optional fixed32 block_to = 2;
-    
+    BlockRange block_range = 1;
+
     // Account for which we want to sync storage maps.
     account.AccountId account_id = 3;
 }
 
 message SyncStorageMapsResponse {
-    // The block number of the last update included in this response.
-    //
-    // For chunked responses, this may be less than request.block_to.
-    // If it is less than request.block_to, the user is expected to make a subsequent request 
-    // starting from the next block to this one (ie, request.block_from = block_num + 1).
-    fixed32 block_num = 1;
-
-    // Current chain tip
-    fixed32 chain_tip = 2;
+    // Pagination information.
+    PaginationInfo pagination_info = 1;
 
     // The list of storage map updates.
-    // 
+    //
     // Multiple updates can be returned for a single slot index and key combination, and the one
     // with a higher `block_num` is expected to be retained by the caller.
-    repeated StorageMapUpdate updates = 3;
+    repeated StorageMapUpdate updates = 2;
 }
 
 // Represents a single storage map update.
@@ -395,10 +433,77 @@ message StorageMapUpdate {
 
     // Slot index ([0..255]).
     uint32 slot_index = 2;
-    
+
     // The storage map key.
     primitives.Digest key = 3;
-        
+
     // The storage map value.
     primitives.Digest value = 4;
+}
+
+// BLOCK RANGE
+// ================================================================================================
+
+// Represents a block range.
+message BlockRange {
+    // Block number from which to start (inclusive).
+    fixed32 block_from = 1;
+
+    // Block number up to which to check (inclusive). If not specified, checks up to the latest block.
+    optional fixed32 block_to = 2;
+}
+
+// PAGINATION INFO
+// ================================================================================================
+
+// Represents pagination information for chunked responses.
+//
+// Pagination is done using block numbers as the axis, allowing requesters to request
+// data in chunks by specifying block ranges and continuing from where the previous
+// response left off.
+//
+// To request the next chunk, the requester should use `block_num + 1` from the previous response
+// as the `block_from` for the next request.
+message PaginationInfo {
+    // Current chain tip
+    fixed32 chain_tip = 1;
+
+    // The block number of the last check included in this response.
+    //
+    // For chunked responses, this may be less than `request.block_range.block_to`.
+    // If it is less than request.block_range.block_to, the user is expected to make a subsequent request
+    // starting from the next block to this one (ie, request.block_range.block_from = block_num + 1).
+    fixed32 block_num = 2;
+}
+
+// SYNC TRANSACTIONS
+// ================================================================================================
+
+// Transactions synchronization request.
+//
+// Allows requesters to sync transactions for specific accounts within a block range.
+message SyncTransactionsRequest {
+    // Block range from which to start synchronizing.
+    BlockRange block_range = 1;
+
+    // Accounts to sync transactions for.
+    repeated account.AccountId account_ids = 2;
+}
+
+// Represents the result of syncing transactions request.
+message SyncTransactionsResponse {
+    // Pagination information.
+    PaginationInfo pagination_info = 1;
+
+    // List of transaction records.
+    repeated TransactionRecord transaction_records = 2;
+}
+
+// Represents a transaction record.
+message TransactionRecord {
+    // Block number in which the transaction was included.
+    fixed32 block_num = 1;
+
+    // A transaction header.
+    transaction.TransactionHeader transaction_header = 2;
 }

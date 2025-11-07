@@ -2,10 +2,11 @@ use tracing::field;
 
 use crate::tracing::OpenTelemetrySpanExt;
 
-/// Returns a [`trace_fn`](tonic::transport::server::Server) implementation for the RPC which
-/// adds open-telemetry information to the span.
+/// Returns a [`trace_fn`](tonic::transport::server::Server) implementation for gRPC requests
+/// which adds open-telemetry information to the span.
 ///
-/// Creates an `info` span following the open-telemetry standard: `{service}.rpc/{method}`.
+/// Creates an `info` span following the open-telemetry standard: `{service}/{method}`.
+/// The span name is dynamically set using the HTTP path via the `otel.name` field.
 /// Additionally also pulls in remote tracing context which allows the server trace to be connected
 /// to the client's origin trace.
 pub fn grpc_trace_fn<T>(request: &http::Request<T>) -> tracing::Span {
@@ -28,17 +29,13 @@ pub fn grpc_trace_fn<T>(request: &http::Request<T>) -> tracing::Span {
     let otel_name = format!("{service}/{method}");
     span.record("otel.name", otel_name);
 
-    // Pull the open-telemetry parent context using the HTTP extractor. We could make a more
-    // generic gRPC extractor by utilising the gRPC metadata. However that
-    //     (a) requires cloning headers,
-    //     (b) we would have to write this ourselves, and
-    //     (c) gRPC metadata is transferred using HTTP headers in any case.
+    // Pull the open-telemetry parent context using the HTTP extractor
     let otel_ctx = opentelemetry::global::get_text_map_propagator(|propagator| {
         propagator.extract(&MetadataExtractor(&tonic::metadata::MetadataMap::from_headers(
             request.headers().clone(),
         )))
     });
-    tracing_opentelemetry::OpenTelemetrySpanExt::set_parent(&span, otel_ctx);
+    let _ = tracing_opentelemetry::OpenTelemetrySpanExt::set_parent(&span, otel_ctx);
 
     // Adds various network attributes to the span, including remote address and port.
     //

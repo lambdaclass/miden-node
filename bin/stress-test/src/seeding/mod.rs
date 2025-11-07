@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use metrics::SeedingMetrics;
-use miden_air::HashFunction;
+use miden_air::ExecutionProof;
 use miden_block_prover::LocalBlockProver;
 use miden_lib::account::auth::AuthRpoFalcon512;
 use miden_lib::account::faucets::BasicFungibleFaucet;
@@ -17,7 +17,14 @@ use miden_node_proto::generated::rpc_store::rpc_client::RpcClient;
 use miden_node_store::{DataDirectory, GenesisState, Store};
 use miden_node_utils::tracing::grpc::OtelInterceptor;
 use miden_objects::account::delta::AccountUpdateDetails;
-use miden_objects::account::{Account, AccountBuilder, AccountId, AccountStorageMode, AccountType};
+use miden_objects::account::{
+    Account,
+    AccountBuilder,
+    AccountDelta,
+    AccountId,
+    AccountStorageMode,
+    AccountType,
+};
 use miden_objects::asset::{Asset, FungibleAsset, TokenSymbol};
 use miden_objects::batch::{BatchAccountUpdate, BatchId, ProvenBatch};
 use miden_objects::block::{
@@ -40,7 +47,6 @@ use miden_objects::transaction::{
     ProvenTransactionBuilder,
     TransactionHeader,
 };
-use miden_objects::vm::ExecutionProof;
 use miden_objects::{AssetError, Felt, ONE, Word};
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -51,7 +57,6 @@ use tokio::{fs, task};
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 use url::Url;
-use winterfell::Proof;
 
 mod metrics;
 
@@ -241,9 +246,7 @@ async fn apply_block(
     metrics: &mut SeedingMetrics,
 ) -> ProvenBlock {
     let proposed_block = ProposedBlock::new(block_inputs, batches).unwrap();
-    let proven_block = LocalBlockProver::new(0)
-        .prove_without_batch_verification(proposed_block)
-        .unwrap();
+    let proven_block = LocalBlockProver::new(0).prove_dummy(proposed_block).unwrap();
     let block_size: usize = proven_block.to_bytes().len();
 
     let start = Instant::now();
@@ -313,14 +316,13 @@ fn create_note(faucet_id: AccountId, target_id: AccountId, rng: &mut RpoRandomCo
 /// the given index.
 fn create_account(public_key: PublicKey, index: u64, storage_mode: AccountStorageMode) -> Account {
     let init_seed: Vec<_> = index.to_be_bytes().into_iter().chain([0u8; 24]).collect();
-    let (new_account, _) = AccountBuilder::new(init_seed.try_into().unwrap())
+    AccountBuilder::new(init_seed.try_into().unwrap())
         .account_type(AccountType::RegularAccountImmutableCode)
         .storage_mode(storage_mode)
-        .with_auth_component(AuthRpoFalcon512::new(public_key))
+        .with_auth_component(AuthRpoFalcon512::new(public_key.into()))
         .with_component(BasicWallet)
         .build()
-        .unwrap();
-    new_account
+        .unwrap()
 }
 
 /// Creates a new faucet account.
@@ -331,14 +333,13 @@ fn create_faucet() -> Account {
     let init_seed = [0_u8; 32];
 
     let token_symbol = TokenSymbol::new("TEST").unwrap();
-    let (new_faucet, _seed) = AccountBuilder::new(init_seed)
+    AccountBuilder::new(init_seed)
         .account_type(AccountType::FungibleFaucet)
         .storage_mode(AccountStorageMode::Private)
         .with_component(BasicFungibleFaucet::new(token_symbol, 2, Felt::new(u64::MAX)).unwrap())
-        .with_auth_component(AuthRpoFalcon512::new(key_pair.public_key()))
+        .with_auth_component(AuthRpoFalcon512::new(key_pair.public_key().into()))
         .build()
-        .unwrap();
-    new_faucet
+        .unwrap()
 }
 
 /// Creates a proven batch from a list of transactions and a reference block.
@@ -391,7 +392,7 @@ fn create_consume_note_tx(
     mut account: Account,
     input_note: InputNote,
 ) -> ProvenTransaction {
-    let init_hash = account.init_commitment();
+    let init_hash = account.initial_commitment();
 
     input_note.note().assets().iter().for_each(|asset| {
         account.vault_mut().add_asset(*asset).unwrap();
@@ -399,22 +400,24 @@ fn create_consume_note_tx(
 
     account.increment_nonce(ONE).unwrap();
 
-    let details = if account.is_public() {
-        AccountUpdateDetails::New(account.clone())
+    let (details, account_delta_commitment) = if account.is_public() {
+        let account_delta = AccountDelta::try_from(account.clone()).unwrap();
+        let commitment = account_delta.clone().to_commitment();
+        (AccountUpdateDetails::Delta(account_delta), commitment)
     } else {
-        AccountUpdateDetails::Private
+        (AccountUpdateDetails::Private, Word::empty())
     };
 
     ProvenTransactionBuilder::new(
         account.id(),
         init_hash,
         account.commitment(),
-        Word::empty(),
+        account_delta_commitment,
         block_ref.block_num(),
         block_ref.commitment(),
         fee_from_block(block_ref).unwrap(),
         u32::MAX.into(),
-        ExecutionProof::new(Proof::new_dummy(), HashFunction::default()),
+        ExecutionProof::new_dummy(),
     )
     .add_input_notes(vec![input_note])
     .account_update_details(details)
@@ -452,7 +455,7 @@ fn create_emit_note_tx(
         )
         .unwrap(),
         u32::MAX.into(),
-        ExecutionProof::new(Proof::new_dummy(), HashFunction::default()),
+        ExecutionProof::new_dummy(),
     )
     .add_output_notes(output_notes.into_iter().map(OutputNote::Full).collect::<Vec<OutputNote>>())
     .build()
@@ -472,7 +475,7 @@ async fn get_batch_inputs(
     let batch_inputs = store_client
         .get_batch_inputs(
             vec![(block_ref.block_num(), block_ref.commitment())].into_iter(),
-            notes.iter().map(Note::id),
+            notes.iter().map(Note::commitment),
         )
         .await
         .unwrap();
@@ -495,7 +498,7 @@ async fn get_block_inputs(
                 batch
                     .input_notes()
                     .into_iter()
-                    .filter_map(|note| note.header().map(NoteHeader::id))
+                    .filter_map(|note| note.header().map(NoteHeader::commitment))
             }),
             batches.iter().map(ProvenBatch::reference_block_num),
         )

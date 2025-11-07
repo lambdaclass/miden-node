@@ -1,22 +1,25 @@
+use std::env;
 use std::path::{Path, PathBuf};
-use std::{env, fs};
 
-use anyhow::Context;
+use fs_err as fs;
 use miden_node_proto_build::{
     block_producer_api_descriptor,
+    remote_prover_api_descriptor,
     rpc_api_descriptor,
     store_block_producer_api_descriptor,
     store_ntx_builder_api_descriptor,
     store_rpc_api_descriptor,
     store_shared_api_descriptor,
+    validator_api_descriptor,
 };
-use tonic_build::FileDescriptorSet;
+use miette::{Context, IntoDiagnostic};
+use tonic_prost_build::FileDescriptorSet;
 
 /// Generates Rust protobuf bindings using miden-node-proto-build.
 ///
 /// This is done only if `BUILD_PROTO` environment variable is set to `1` to avoid running the
 /// script on crates.io where repo-level .proto files are not available.
-fn main() -> anyhow::Result<()> {
+fn main() -> miette::Result<()> {
     println!("cargo::rerun-if-changed=../../proto/proto");
     println!("cargo::rerun-if-env-changed=BUILD_PROTO");
 
@@ -30,8 +33,12 @@ fn main() -> anyhow::Result<()> {
     let dst_dir = crate_root.join("src").join("generated");
 
     // Remove all existing files.
-    fs::remove_dir_all(&dst_dir).context("removing existing files")?;
-    fs::create_dir(&dst_dir).context("creating destination folder")?;
+    fs::remove_dir_all(&dst_dir)
+        .into_diagnostic()
+        .wrap_err("removing existing files")?;
+    fs::create_dir(&dst_dir)
+        .into_diagnostic()
+        .wrap_err("creating destination folder")?;
 
     generate_bindings(rpc_api_descriptor(), &dst_dir)?;
     generate_bindings(store_rpc_api_descriptor(), &dst_dir)?;
@@ -39,23 +46,26 @@ fn main() -> anyhow::Result<()> {
     generate_bindings(store_block_producer_api_descriptor(), &dst_dir)?;
     generate_bindings(store_shared_api_descriptor(), &dst_dir)?;
     generate_bindings(block_producer_api_descriptor(), &dst_dir)?;
+    generate_bindings(remote_prover_api_descriptor(), &dst_dir)?;
+    generate_bindings(validator_api_descriptor(), &dst_dir)?;
 
-    generate_mod_rs(&dst_dir).context("generating mod.rs")?;
+    generate_mod_rs(&dst_dir).into_diagnostic().wrap_err("generating mod.rs")?;
 
     Ok(())
 }
 
 /// Generates protobuf bindings from the given file descriptor set and stores them in the
 /// given destination directory.
-fn generate_bindings(file_descriptors: FileDescriptorSet, dst_dir: &Path) -> anyhow::Result<()> {
-    let mut prost_config = prost_build::Config::new();
+fn generate_bindings(file_descriptors: FileDescriptorSet, dst_dir: &Path) -> miette::Result<()> {
+    let mut prost_config = tonic_prost_build::Config::new();
     prost_config.skip_debug(["AccountId", "Digest"]);
 
     // Generate the stub of the user facing server from its proto file
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .out_dir(dst_dir)
-        .compile_fds_with_config(prost_config, file_descriptors)
-        .context("compiling protobufs")?;
+        .compile_fds_with_config(file_descriptors, prost_config)
+        .into_diagnostic()
+        .wrap_err("compiling protobufs")?;
 
     Ok(())
 }
@@ -66,7 +76,7 @@ fn generate_mod_rs(directory: impl AsRef<Path>) -> std::io::Result<()> {
 
     // Discover all submodules by iterating over the folder contents.
     let mut submodules = Vec::new();
-    for entry in fs::read_dir(directory)? {
+    for entry in fs::read_dir(directory.as_ref())? {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() {

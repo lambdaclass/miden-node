@@ -10,6 +10,7 @@ use miden_lib::note::create_p2id_note;
 use miden_lib::transaction::TransactionKernel;
 use miden_node_proto::domain::account::AccountSummary;
 use miden_node_utils::fee::test_fee_params;
+use miden_objects::account::auth::PublicKeyCommitment;
 use miden_objects::account::delta::AccountUpdateDetails;
 use miden_objects::account::{
     Account,
@@ -24,7 +25,7 @@ use miden_objects::account::{
     AccountVaultDelta,
     StorageSlot,
 };
-use miden_objects::asset::{Asset, FungibleAsset};
+use miden_objects::asset::{Asset, AssetVaultKey, FungibleAsset};
 use miden_objects::block::{
     BlockAccountUpdate,
     BlockHeader,
@@ -32,13 +33,13 @@ use miden_objects::block::{
     BlockNoteTree,
     BlockNumber,
 };
-use miden_objects::crypto::dsa::rpo_falcon512::PublicKey;
 use miden_objects::crypto::merkle::SparseMerklePath;
 use miden_objects::crypto::rand::RpoRandomCoin;
 use miden_objects::note::{
     Note,
     NoteDetails,
     NoteExecutionHint,
+    NoteHeader,
     NoteId,
     NoteMetadata,
     NoteTag,
@@ -52,7 +53,13 @@ use miden_objects::testing::account_id::{
     ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_IMMUTABLE_CODE,
     ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_IMMUTABLE_CODE_2,
 };
-use miden_objects::transaction::{OrderedTransactionHeaders, TransactionHeader, TransactionId};
+use miden_objects::transaction::{
+    InputNoteCommitment,
+    InputNotes,
+    OrderedTransactionHeaders,
+    TransactionHeader,
+    TransactionId,
+};
 use miden_objects::{EMPTY_WORD, Felt, FieldElement, Word, ZERO};
 use pretty_assertions::assert_eq;
 use rand::Rng;
@@ -154,9 +161,7 @@ fn sql_select_transactions() {
         queries::select_transactions_by_accounts_and_block_range(
             conn,
             &[AccountId::try_from(ACCOUNT_ID_PRIVATE_SENDER).unwrap()],
-            // TODO use a Range<BlockNumber> expression
-            0.into(),
-            2.into(),
+            BlockNumber::from(0)..=BlockNumber::from(2),
         )
         .unwrap()
     }
@@ -244,6 +249,7 @@ fn sql_select_notes() {
             block_num,
             note_index: BlockNoteIndex::new(0, i.try_into().unwrap()).unwrap(),
             note_id: num_to_word(u64::try_from(i).unwrap()),
+            note_commitment: num_to_word(u64::try_from(i).unwrap()),
             metadata: *new_note.metadata(),
             details: Some(NoteDetails::from(&new_note)),
             inclusion_path: SparseMerklePath::default(),
@@ -293,6 +299,7 @@ fn sql_select_notes_different_execution_hints() {
         block_num,
         note_index: BlockNoteIndex::new(0, 0).unwrap(),
         note_id: num_to_word(0),
+        note_commitment: num_to_word(0),
         metadata: NoteMetadata::new(
             sender,
             NoteType::Public,
@@ -318,6 +325,7 @@ fn sql_select_notes_different_execution_hints() {
         block_num,
         note_index: BlockNoteIndex::new(0, 1).unwrap(),
         note_id: num_to_word(1),
+        note_commitment: num_to_word(1),
         metadata: NoteMetadata::new(
             sender,
             NoteType::Public,
@@ -341,6 +349,7 @@ fn sql_select_notes_different_execution_hints() {
         block_num,
         note_index: BlockNoteIndex::new(0, 2).unwrap(),
         note_id: num_to_word(2),
+        note_commitment: num_to_word(2),
         metadata: NoteMetadata::new(
             sender,
             NoteType::Public,
@@ -363,6 +372,45 @@ fn sql_select_notes_different_execution_hints() {
     );
 }
 
+#[test]
+#[miden_node_test_macro::enable_logging]
+fn sql_select_note_script_by_root() {
+    let mut conn = create_db();
+    let conn = &mut conn;
+    let block_num = BlockNumber::from(1);
+    create_block(conn, block_num);
+
+    let account_id = AccountId::try_from(ACCOUNT_ID_PRIVATE_SENDER).unwrap();
+
+    queries::upsert_accounts(conn, &[mock_block_account_update(account_id, 0)], block_num).unwrap();
+
+    let new_note = create_note(account_id);
+
+    // test multiple entries
+    let mut state = vec![];
+    let note = NoteRecord {
+        block_num,
+        note_index: BlockNoteIndex::new(0, 0.try_into().unwrap()).unwrap(),
+        note_id: num_to_word(0),
+        note_commitment: num_to_word(0),
+        metadata: *new_note.metadata(),
+        details: Some(NoteDetails::from(&new_note)),
+        inclusion_path: SparseMerklePath::default(),
+    };
+    state.push(note.clone());
+
+    let res = queries::insert_scripts(conn, [&note]);
+    assert_eq!(res.unwrap(), 1, "One element must have been inserted");
+
+    // test querying the script by the root
+    let note_script = queries::select_note_script_by_root(conn, new_note.script().root()).unwrap();
+    assert_eq!(note_script, Some(new_note.script().clone()));
+
+    // test querying the script by the root that is not in the database
+    let note_script = queries::select_note_script_by_root(conn, [0_u16; 4].into()).unwrap();
+    assert_eq!(note_script, None);
+}
+
 // Generates an account, inserts into the database, and creates a note for it.
 fn make_account_and_note(
     conn: &mut SqliteConnection,
@@ -383,7 +431,7 @@ fn make_account_and_note(
             &[BlockAccountUpdate::new(
                 account_id,
                 account.commitment(),
-                AccountUpdateDetails::New(account),
+                AccountUpdateDetails::Delta(AccountDelta::try_from(account).unwrap()),
             )],
             block_num,
         )
@@ -425,6 +473,7 @@ fn sql_unconsumed_network_notes() {
                 block_num,
                 note_index: BlockNoteIndex::new(0, i as usize).unwrap(),
                 note_id: num_to_word(i),
+                note_commitment: num_to_word(i),
                 metadata: NoteMetadata::new(
                     account_notes[index].0,
                     NoteType::Public,
@@ -547,6 +596,7 @@ fn sql_unconsumed_network_notes_for_account() {
                 block_num: 0.into(), // Created on same block.
                 note_index: BlockNoteIndex::new(0, i as usize).unwrap(),
                 note_id: num_to_word(i.into()),
+                note_commitment: num_to_word(i.into()),
                 metadata: NoteMetadata::new(
                     account_note.0,
                     NoteType::Public,
@@ -679,8 +729,8 @@ fn sync_account_vault_basic_validation() {
         .unwrap();
 
     // Create some test vault assets
-    let vault_key_1 = num_to_word(100);
-    let vault_key_2 = num_to_word(200);
+    let vault_key_1 = AssetVaultKey::new_unchecked(num_to_word(100));
+    let vault_key_2 = AssetVaultKey::new_unchecked(num_to_word(200));
     let fungible_asset_1 = Asset::Fungible(FungibleAsset::new(public_account_id, 1000).unwrap());
     let fungible_asset_2 = Asset::Fungible(FungibleAsset::new(public_account_id, 2000).unwrap());
 
@@ -715,8 +765,11 @@ fn sync_account_vault_basic_validation() {
     .unwrap();
 
     // Test invalid block range - should return error
-    let result =
-        queries::select_account_vault_assets(conn, public_account_id, invalid_block_from, block_to);
+    let result = queries::select_account_vault_assets(
+        conn,
+        public_account_id,
+        invalid_block_from..=block_to,
+    );
     assert!(result.is_err(), "expected error for invalid block range");
 
     let Err(crate::errors::DatabaseError::InvalidBlockRange { .. }) = result else {
@@ -725,7 +778,7 @@ fn sync_account_vault_basic_validation() {
 
     // Test with valid block range - should return vault assets
     let (last_block, values) =
-        queries::select_account_vault_assets(conn, public_account_id, block_from, block_to)
+        queries::select_account_vault_assets(conn, public_account_id, block_from..=block_to)
             .unwrap();
 
     // Should return assets we inserted
@@ -746,9 +799,12 @@ fn select_nullifiers_by_prefix_works() {
     let mut conn = create_db();
     let conn = &mut conn; // test empty table
     let block_number0 = 0.into();
-    let nullifiers =
-        queries::select_nullifiers_by_prefix(conn, PREFIX_LEN, &[], block_number0).unwrap();
+    let block_number10 = 10.into();
+    let (nullifiers, block_number_reached) =
+        queries::select_nullifiers_by_prefix(conn, PREFIX_LEN, &[], block_number0..=block_number10)
+            .unwrap();
     assert!(nullifiers.is_empty());
+    assert_eq!(block_number_reached, block_number10);
 
     // test single item
     let nullifier1 = num_to_nullifier(1 << 48);
@@ -757,11 +813,11 @@ fn select_nullifiers_by_prefix_works() {
 
     queries::insert_nullifiers_for_block(conn, &[nullifier1], block_number1).unwrap();
 
-    let nullifiers = queries::select_nullifiers_by_prefix(
+    let (nullifiers, block_number_reached) = queries::select_nullifiers_by_prefix(
         conn,
         PREFIX_LEN,
         &[utils::get_nullifier_prefix(&nullifier1)],
-        block_number0,
+        block_number0..=block_number10,
     )
     .unwrap();
     assert_eq!(
@@ -771,6 +827,8 @@ fn select_nullifiers_by_prefix_works() {
             block_num: block_number1
         }]
     );
+    // Block number reached should be the last block number (the block number of the last nullifier)
+    assert_eq!(block_number_reached, block_number10);
 
     // test two elements
     let nullifier2 = num_to_nullifier(2 << 48);
@@ -783,11 +841,11 @@ fn select_nullifiers_by_prefix_works() {
     assert_eq!(nullifiers, vec![(nullifier1, block_number1), (nullifier2, block_number2)]);
 
     // only the nullifiers matching the prefix are included
-    let nullifiers = queries::select_nullifiers_by_prefix(
+    let (nullifiers, _) = queries::select_nullifiers_by_prefix(
         conn,
         PREFIX_LEN,
         &[utils::get_nullifier_prefix(&nullifier1)],
-        block_number0,
+        block_number0..=block_number10,
     )
     .unwrap();
     assert_eq!(
@@ -797,11 +855,11 @@ fn select_nullifiers_by_prefix_works() {
             block_num: block_number1
         }]
     );
-    let nullifiers = queries::select_nullifiers_by_prefix(
+    let (nullifiers, _) = queries::select_nullifiers_by_prefix(
         conn,
         PREFIX_LEN,
         &[utils::get_nullifier_prefix(&nullifier2)],
-        block_number0,
+        block_number0..=block_number10,
     )
     .unwrap();
     assert_eq!(
@@ -813,14 +871,14 @@ fn select_nullifiers_by_prefix_works() {
     );
 
     // All matching nullifiers are included
-    let nullifiers = queries::select_nullifiers_by_prefix(
+    let (nullifiers, _) = queries::select_nullifiers_by_prefix(
         conn,
         PREFIX_LEN,
         &[
             utils::get_nullifier_prefix(&nullifier1),
             utils::get_nullifier_prefix(&nullifier2),
         ],
-        block_number0,
+        block_number0..=block_number10,
     )
     .unwrap();
     assert_eq!(
@@ -838,25 +896,25 @@ fn select_nullifiers_by_prefix_works() {
     );
 
     // If a non-matching prefix is provided, no nullifiers are returned
-    let nullifiers = queries::select_nullifiers_by_prefix(
+    let (nullifiers, _) = queries::select_nullifiers_by_prefix(
         conn,
         PREFIX_LEN,
         &[utils::get_nullifier_prefix(&num_to_nullifier(3 << 48))],
-        block_number0,
+        block_number0..=block_number10,
     )
     .unwrap();
     assert!(nullifiers.is_empty());
 
     // If a block number is provided, only matching nullifiers created at or after that block are
     // returned
-    let nullifiers = queries::select_nullifiers_by_prefix(
+    let (nullifiers, _) = queries::select_nullifiers_by_prefix(
         conn,
         PREFIX_LEN,
         &[
             utils::get_nullifier_prefix(&nullifier1),
             utils::get_nullifier_prefix(&nullifier2),
         ],
-        block_number2,
+        block_number2..=block_number10,
     )
     .unwrap();
     assert_eq!(
@@ -866,6 +924,39 @@ fn select_nullifiers_by_prefix_works() {
             block_num: block_number2
         }]
     );
+
+    // Nullifiers are not returned if the block number is after the last nullifier
+    let nullifier3 = num_to_nullifier(3 << 48);
+    let block_number3 = 3.into();
+    create_block(conn, block_number3);
+
+    queries::insert_nullifiers_for_block(conn, &[nullifier3], block_number3).unwrap();
+
+    let (nullifiers, block_number_reached) = queries::select_nullifiers_by_prefix(
+        conn,
+        PREFIX_LEN,
+        &[
+            utils::get_nullifier_prefix(&nullifier1),
+            utils::get_nullifier_prefix(&nullifier2),
+            utils::get_nullifier_prefix(&nullifier3),
+        ],
+        block_number0..=block_number2,
+    )
+    .unwrap();
+    assert_eq!(
+        nullifiers,
+        vec![
+            NullifierInfo {
+                nullifier: nullifier1,
+                block_num: block_number1
+            },
+            NullifierInfo {
+                nullifier: nullifier2,
+                block_num: block_number2
+            }
+        ]
+    );
+    assert_eq!(block_number_reached, block_number2);
 }
 
 #[test]
@@ -953,9 +1044,12 @@ fn db_account() {
             .iter()
             .map(|acc_id| (*acc_id).try_into().unwrap())
             .collect();
-    let res =
-        queries::select_accounts_by_block_range(conn, &account_ids, 0.into(), u32::MAX.into())
-            .unwrap();
+    let res = queries::select_accounts_by_block_range(
+        conn,
+        &account_ids,
+        BlockNumber::from(0)..=u32::MAX.into(),
+    )
+    .unwrap();
     assert!(res.is_empty());
 
     // test insertion
@@ -976,9 +1070,12 @@ fn db_account() {
     assert_eq!(row_count, 1);
 
     // test successful query
-    let res =
-        queries::select_accounts_by_block_range(conn, &account_ids, 0.into(), u32::MAX.into())
-            .unwrap();
+    let res = queries::select_accounts_by_block_range(
+        conn,
+        &account_ids,
+        BlockNumber::from(0)..=u32::MAX.into(),
+    )
+    .unwrap();
     assert_eq!(
         res,
         vec![AccountSummary {
@@ -992,8 +1089,7 @@ fn db_account() {
     let res = queries::select_accounts_by_block_range(
         conn,
         &account_ids,
-        (block_num.as_u32() + 1).into(),
-        u32::MAX.into(),
+        (block_num.as_u32() + 1).into()..=u32::MAX.into(),
     )
     .unwrap();
     assert!(res.is_empty());
@@ -1002,8 +1098,7 @@ fn db_account() {
     let res = queries::select_accounts_by_block_range(
         conn,
         &[6.try_into().unwrap(), 7.try_into().unwrap(), 8.try_into().unwrap()],
-        (block_num.as_u32() + 1).into(),
-        u32::MAX.into(),
+        (block_num + 1)..=u32::MAX.into(),
     )
     .unwrap();
     assert!(res.is_empty());
@@ -1017,21 +1112,25 @@ fn notes() {
     let block_num_1 = 1.into();
     create_block(conn, block_num_1);
 
+    let block_range = BlockNumber::from(0)..=BlockNumber::from(1);
+
     // test empty table
-    let res =
-        queries::select_notes_since_block_by_tag_and_sender(conn, BlockNumber::from(0), &[], &[])
+    let (res, last_included_block) =
+        queries::select_notes_since_block_by_tag_and_sender(conn, &[], &[], block_range.clone())
             .unwrap();
 
     assert!(res.is_empty());
+    assert_eq!(last_included_block, 1.into());
 
-    let res = queries::select_notes_since_block_by_tag_and_sender(
+    let (res, last_included_block) = queries::select_notes_since_block_by_tag_and_sender(
         conn,
-        BlockNumber::from(0),
         &[],
         &[1, 2, 3],
+        block_range.clone(),
     )
     .unwrap();
     assert!(res.is_empty());
+    assert_eq!(last_included_block, 1.into());
 
     let sender = AccountId::try_from(ACCOUNT_ID_PRIVATE_SENDER).unwrap();
 
@@ -1054,6 +1153,7 @@ fn notes() {
         block_num: block_num_1,
         note_index,
         note_id: new_note.id().into(),
+        note_commitment: new_note.commitment(),
         metadata: NoteMetadata::new(
             sender,
             NoteType::Public,
@@ -1070,25 +1170,27 @@ fn notes() {
     queries::insert_notes(conn, &[(note.clone(), None)]).unwrap();
 
     // test empty tags
-    let res =
-        queries::select_notes_since_block_by_tag_and_sender(conn, BlockNumber::from(0), &[], &[])
+    let (res, last_included_block) =
+        queries::select_notes_since_block_by_tag_and_sender(conn, &[], &[], block_range.clone())
             .unwrap();
     assert!(res.is_empty());
+    assert_eq!(last_included_block, 1.into());
+
+    let block_range_1 = 1.into()..=1.into();
 
     // test no updates
-    let res = queries::select_notes_since_block_by_tag_and_sender(conn, block_num_1, &[], &[tag])
-        .unwrap();
+    let (res, last_included_block) =
+        queries::select_notes_since_block_by_tag_and_sender(conn, &[], &[tag], block_range_1)
+            .unwrap();
     assert!(res.is_empty());
+    assert_eq!(last_included_block, 1.into());
 
     // test match
-    let res = queries::select_notes_since_block_by_tag_and_sender(
-        conn,
-        block_num_1.parent().unwrap(),
-        &[],
-        &[tag],
-    )
-    .unwrap();
+    let (res, last_included_block) =
+        queries::select_notes_since_block_by_tag_and_sender(conn, &[], &[tag], block_range.clone())
+            .unwrap();
     assert_eq!(res, vec![note.clone().into()]);
+    assert_eq!(last_included_block, 1.into());
 
     let block_num_2 = note.block_num + 1;
     create_block(conn, block_num_2);
@@ -1098,6 +1200,7 @@ fn notes() {
         block_num: block_num_2,
         note_index: note.note_index,
         note_id: new_note.id().into(),
+        note_commitment: new_note.commitment(),
         metadata: note.metadata,
         details: None,
         inclusion_path: inclusion_path.clone(),
@@ -1105,20 +1208,24 @@ fn notes() {
 
     queries::insert_notes(conn, &[(note2.clone(), None)]).unwrap();
 
+    let block_range = 0.into()..=2.into();
+
     // only first note is returned
-    let res = queries::select_notes_since_block_by_tag_and_sender(
-        conn,
-        block_num_1.parent().unwrap(),
-        &[],
-        &[tag],
-    )
-    .unwrap();
+    let (res, last_included_block) =
+        queries::select_notes_since_block_by_tag_and_sender(conn, &[], &[tag], block_range)
+            .unwrap();
     assert_eq!(res, vec![note.clone().into()]);
+    assert_eq!(last_included_block, 1.into());
+
+    let block_range = 1.into()..=2.into();
 
     // only the second note is returned
-    let res = queries::select_notes_since_block_by_tag_and_sender(conn, block_num_1, &[], &[tag])
-        .unwrap();
+    let (res, last_included_block) =
+        queries::select_notes_since_block_by_tag_and_sender(conn, &[], &[tag], block_range)
+            .unwrap();
     assert_eq!(res, vec![note2.clone().into()]);
+    assert_eq!(last_included_block, 2.into());
+
     // test query notes by id
     let notes = vec![note.clone(), note2];
 
@@ -1184,7 +1291,7 @@ fn sql_account_storage_map_values_insertion() {
     insert_account_delta(conn, account_id, block1, &delta1);
 
     let storage_map_page =
-        queries::select_account_storage_map_values(conn, account_id, BlockNumber::GENESIS, block1)
+        queries::select_account_storage_map_values(conn, account_id, BlockNumber::GENESIS..=block1)
             .unwrap();
     assert_eq!(storage_map_page.values.len(), 2, "expect 2 initial rows");
 
@@ -1199,7 +1306,7 @@ fn sql_account_storage_map_values_insertion() {
     insert_account_delta(conn, account_id, block2, &delta2);
 
     let storage_map_values =
-        queries::select_account_storage_map_values(conn, account_id, BlockNumber::GENESIS, block2)
+        queries::select_account_storage_map_values(conn, account_id, BlockNumber::GENESIS..=block2)
             .unwrap();
 
     assert_eq!(storage_map_values.values.len(), 3, "three rows (with duplicate key)");
@@ -1257,8 +1364,7 @@ fn select_storage_map_sync_values() {
     let page = queries::select_account_storage_map_values(
         &mut conn,
         account_id,
-        BlockNumber::from(2),
-        BlockNumber::from(3),
+        BlockNumber::from(2)..=BlockNumber::from(3),
     )
     .unwrap();
 
@@ -1309,6 +1415,24 @@ fn mock_block_transaction(account_id: AccountId, num: u64) -> TransactionHeader 
     let input_notes_commitment = Word::try_from([0, 0, num, 0]).unwrap();
     let output_notes_commitment = Word::try_from([0, 0, 0, num]).unwrap();
 
+    let notes = vec![InputNoteCommitment::from(num_to_nullifier(num))];
+    let input_notes = InputNotes::new_unchecked(notes);
+
+    let output_notes = vec![NoteHeader::new(
+        NoteId::new(
+            Word::try_from([num, num, 0, 0]).unwrap(),
+            Word::try_from([0, 0, num, num]).unwrap(),
+        ),
+        NoteMetadata::new(
+            account_id,
+            NoteType::Public,
+            NoteTag::LocalAny(num as u32),
+            NoteExecutionHint::None,
+            Felt::default(),
+        )
+        .unwrap(),
+    )];
+
     TransactionHeader::new_unchecked(
         TransactionId::new(
             initial_state_commitment,
@@ -1319,11 +1443,8 @@ fn mock_block_transaction(account_id: AccountId, num: u64) -> TransactionHeader 
         account_id,
         initial_state_commitment,
         final_account_commitment,
-        vec![num_to_nullifier(num)],
-        vec![NoteId::new(
-            Word::try_from([num, num, 0, 0]).unwrap(),
-            Word::try_from([0, 0, num, num]).unwrap(),
-        )],
+        input_notes,
+        output_notes,
     )
 }
 
@@ -1385,7 +1506,7 @@ fn mock_account_code_and_storage(
         .storage_mode(storage_mode)
         .with_assets(assets)
         .with_component(component)
-        .with_auth_component(AuthRpoFalcon512::new(PublicKey::new(EMPTY_WORD)))
+        .with_auth_component(AuthRpoFalcon512::new(PublicKeyCommitment::from(EMPTY_WORD)))
         .build_existing()
         .unwrap()
 }

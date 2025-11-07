@@ -15,23 +15,23 @@ version.workspace      = true
 workspace = true
 
 [dependencies]
-anyhow           = { workspace = true }
-hex              = { version = "0.4" }
-http             = { workspace = true }
-miden-node-utils = { workspace = true }
-miden-objects    = { workspace = true }
-prost            = { workspace = true }
-thiserror        = { workspace = true }
-tonic            = { workspace = true }
-url              = { workspace = true }
+anyhow                      = { workspace = true }
+hex                         = { version = "0.4" }
+http                        = { workspace = true }
+miden-node-grpc-error-macro = { workspace = true }
+miden-node-utils            = { workspace = true }
+miden-objects               = { workspace = true }
+prost                       = { workspace = true }
+thiserror                   = { workspace = true }
+tonic                       = { workspace = true }
+tonic-prost                 = { workspace = true }
+url                         = { workspace = true }
 
 [dev-dependencies]
 proptest = { version = "1.7" }
 
 [build-dependencies]
-anyhow                 = { workspace = true }
+fs-err                 = { workspace = true }
 miden-node-proto-build = { features = ["internal"], workspace = true }
-prost                  = { workspace = true }
-prost-build            = { version = "0.13" }
-protox                 = { version = "0.8" }
-tonic-build            = { version = "0.13" }
+miette                 = { version = "7.6" }
+tonic-prost-build      = { workspace = true }

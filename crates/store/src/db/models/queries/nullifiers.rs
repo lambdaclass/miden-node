@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use diesel::query_dsl::methods::SelectDsl;
 use diesel::{
     ExpressionMethods,
@@ -23,7 +25,13 @@ use crate::db::models::conv::{SqlTypeConvert, nullifier_prefix_to_raw_sql};
 use crate::db::models::utils::{get_nullifier_prefix, vec_raw_try_into};
 use crate::db::{NullifierInfo, schema};
 
-/// Returns nullifiers filtered by prefix and block creation height.
+/// Returns nullifiers filtered by prefix within a block number range.
+///
+/// # Parameters
+/// * `prefix_len`: Length of nullifier prefix in bits
+///     - Must be exactly 16 bits
+/// * `nullifier_prefixes`: List of nullifier prefixes to filter by
+///     - Limit: 0 <= count <= 1000
 ///
 /// Each value of the `nullifier_prefixes` is only the `prefix_len` most significant bits
 /// of the nullifier of interest to the client. This hides the details of the specific
@@ -32,35 +40,75 @@ use crate::db::{NullifierInfo, schema};
 /// # Returns
 ///
 /// A vector of [`NullifierInfo`] with the nullifiers and the block height at which they were
+///
+/// # Raw SQL
+///
+/// ```sql
+/// SELECT
+///     nullifier,
+///     block_num
+/// FROM
+///     nullifiers
+/// WHERE
+///     nullifier_prefix IN (?1) AND
+///     block_num >= ?2 AND
+///     block_num <= ?3
+/// ORDER BY
+///     block_num ASC
+/// LIMIT
+///     ?4
+/// ```
 pub(crate) fn select_nullifiers_by_prefix(
     conn: &mut SqliteConnection,
     prefix_len: u8,
     nullifier_prefixes: &[u16],
-    block_num: BlockNumber,
-) -> Result<Vec<NullifierInfo>, DatabaseError> {
+    block_range: RangeInclusive<BlockNumber>,
+) -> Result<(Vec<NullifierInfo>, BlockNumber), DatabaseError> {
+    // Size calculation: max 2^16 nullifiers per block × 36 bytes per nullifier = ~2.25MB
+    // We use 2.5MB to provide a safety margin for the unlikely case of hitting the maximum
+    pub const MAX_PAYLOAD_BYTES: usize = 2_500_000; // 2.5 MB - allows for max block size of ~2.25MB
+    pub const NULLIFIER_BYTES: usize = 32; // digest size (nullifier)
+    pub const BLOCK_NUM_BYTES: usize = 4; // 32 bits per block number
+    pub const ROW_OVERHEAD_BYTES: usize = NULLIFIER_BYTES + BLOCK_NUM_BYTES; // 36 bytes
+    pub const MAX_ROWS: usize = MAX_PAYLOAD_BYTES / ROW_OVERHEAD_BYTES;
+
     assert_eq!(prefix_len, 16, "Only 16-bit prefixes are supported");
+
+    if block_range.is_empty() {
+        return Err(DatabaseError::InvalidBlockRange {
+            from: *block_range.start(),
+            to: *block_range.end(),
+        });
+    }
 
     QueryParamNullifierPrefixLimit::check(nullifier_prefixes.len())?;
 
-    // SELECT
-    //     nullifier,
-    //     block_num
-    // FROM
-    //     nullifiers
-    // WHERE
-    //     nullifier_prefix IN rarray(?1) AND
-    //     block_num >= ?2
-    // ORDER BY
-    //     block_num ASC
-
     let prefixes = nullifier_prefixes.iter().map(|prefix| nullifier_prefix_to_raw_sql(*prefix));
-    let nullifiers_raw =
-        SelectDsl::select(schema::nullifiers::table, NullifierWithoutPrefixRawRow::as_select())
+    let raw = SelectDsl::select(schema::nullifiers::table, NullifierWithoutPrefixRawRow::as_select())
             .filter(schema::nullifiers::nullifier_prefix.eq_any(prefixes))
-            .filter(schema::nullifiers::block_num.ge(block_num.to_raw_sql()))
+            .filter(schema::nullifiers::block_num.ge(block_range.start().to_raw_sql()))
+            .filter(schema::nullifiers::block_num.le(block_range.end().to_raw_sql()))
             .order(schema::nullifiers::block_num.asc())
+            // Request an additional row so we can determine whether this is the last page.
+            .limit(i64::try_from(MAX_ROWS + 1).expect("limit fits within i64"))
             .load::<NullifierWithoutPrefixRawRow>(conn)?;
-    vec_raw_try_into(nullifiers_raw)
+
+    // Discard the last block in the response (assumes more than one block may be present)
+    if let Some(last) = raw.last()
+        && raw.len() > MAX_ROWS
+    {
+        let last_block_num_i64 = last.block_num;
+
+        let nullifiers = vec_raw_try_into(
+            raw.into_iter().take_while(|row| row.block_num != last_block_num_i64),
+        )?;
+
+        let last_block_included = BlockNumber::from_raw_sql(last_block_num_i64.saturating_sub(1))?;
+
+        Ok((nullifiers, last_block_included))
+    } else {
+        Ok((vec_raw_try_into(raw)?, *block_range.end()))
+    }
 }
 
 /// Select all nullifiers from the DB
@@ -68,18 +116,33 @@ pub(crate) fn select_nullifiers_by_prefix(
 /// # Returns
 ///
 /// A vector with nullifiers and the block height at which they were created, or an error.
+///
+/// # Raw SQL
+///
+/// ```sql
+/// SELECT
+///     nullifier,
+///     block_num
+/// FROM
+///     nullifiers
+/// ORDER BY
+///     block_num ASC
+/// ```
 pub(crate) fn select_all_nullifiers(
     conn: &mut SqliteConnection,
 ) -> Result<Vec<NullifierInfo>, DatabaseError> {
-    // SELECT nullifier, block_num FROM nullifiers ORDER BY block_num ASC
     let nullifiers_raw =
         SelectDsl::select(schema::nullifiers::table, NullifierWithoutPrefixRawRow::as_select())
             .load::<NullifierWithoutPrefixRawRow>(conn)?;
     vec_raw_try_into(nullifiers_raw)
 }
 
-/// Commit nullifiers to the DB using the given [`SqliteConnection`]. This inserts the nullifiers
-/// into the nullifiers table, and marks the note as consumed (if it was public).
+/// Insert nullifiers for a block into the database.
+///
+/// # Parameters
+/// * `nullifiers`: List of nullifiers to insert
+///     - Limit: 0 <= count <= 1000
+/// * `block_num`: Block number to associate with the nullifiers
 ///
 /// # Returns
 ///
@@ -89,14 +152,23 @@ pub(crate) fn select_all_nullifiers(
 ///
 /// The [`SqliteConnection`] object is not consumed. It's up to the caller to commit or rollback the
 /// transaction.
+///
+/// # Raw SQL
+///
+/// ```sql
+/// UPDATE notes
+/// SET consumed_at = ?1
+/// WHERE nullifier IN (?2);
+///
+/// INSERT INTO nullifiers (nullifier, nullifier_prefix, block_num)
+/// VALUES (?1, ?2, ?3)
+/// ```
 pub(crate) fn insert_nullifiers_for_block(
     conn: &mut SqliteConnection,
     nullifiers: &[Nullifier],
     block_num: BlockNumber,
 ) -> Result<usize, DatabaseError> {
     QueryParamNullifierLimit::check(nullifiers.len())?;
-
-    // UPDATE notes SET consumed = TRUE WHERE nullifier IN rarray(?1)
     let serialized_nullifiers =
         Vec::<Vec<u8>>::from_iter(nullifiers.iter().map(Nullifier::to_bytes));
 

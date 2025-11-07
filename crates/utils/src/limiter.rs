@@ -55,7 +55,7 @@ impl QueryParamLimiter for QueryParamNullifierPrefixLimit {
 
 /// Used for the following RPC endpoints
 /// * `select_nullifiers_by_prefix`
-/// * `check_nullifiers_by_prefix`
+/// * `sync_nullifiers`
 /// * `sync_state`
 pub struct QueryParamNullifierLimit;
 impl QueryParamLimiter for QueryParamNullifierLimit {
@@ -76,6 +76,13 @@ impl QueryParamLimiter for QueryParamNoteTagLimit {
 pub struct QueryParamNoteIdLimit;
 impl QueryParamLimiter for QueryParamNoteIdLimit {
     const PARAM_NAME: &str = "note_id";
+    const LIMIT: usize = 1000;
+}
+
+/// Used for internal queries retrieving note inclusion proofs by commitment.
+pub struct QueryParamNoteCommitmentLimit;
+impl QueryParamLimiter for QueryParamNoteCommitmentLimit {
+    const PARAM_NAME: &str = "note_commitment";
     const LIMIT: usize = 1000;
 }
 

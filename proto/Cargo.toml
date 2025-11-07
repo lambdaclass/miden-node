@@ -20,10 +20,10 @@ internal = []
 workspace = true
 
 [dependencies]
-protox      = { version = "0.8" }
-tonic-build = { version = "0.13" }
+protox            = { workspace = true }
+tonic-prost-build = { workspace = true }
 
 [build-dependencies]
-anyhow = { workspace = true }
-prost  = { workspace = true }
-protox = { version = "0.8" }
+fs-err = { workspace = true }
+miette = { version = "7.6" }
+protox = { workspace = true }
