@@ -8,9 +8,12 @@ use miden_node_proto::clients::{Builder as ClientBuilder, RemoteProverProxy, Rpc
 use tokio::sync::watch;
 use tokio::sync::watch::Receiver;
 use tokio::task::{Id, JoinSet};
-use tracing::debug;
+use tracing::{debug, instrument};
 
+use crate::COMPONENT;
 use crate::config::MonitorConfig;
+use crate::counter::run_ntx_service_task;
+use crate::deploy::ensure_accounts_exist;
 use crate::faucet::run_faucet_test_task;
 use crate::frontend::{ServerState, serve};
 use crate::remote_prover::{ProofType, generate_prover_test_payload, run_remote_prover_test_task};
@@ -39,6 +42,7 @@ impl Tasks {
     }
 
     /// Spawn the RPC status checker task.
+    #[instrument(target = COMPONENT, name = "tasks.spawn-rpc-checker", skip_all)]
     pub async fn spawn_rpc_checker(
         &mut self,
         config: &MonitorConfig,
@@ -71,6 +75,7 @@ impl Tasks {
     }
 
     /// Spawn prover status and test tasks for all configured provers.
+    #[instrument(target = COMPONENT, name = "tasks.spawn-prover-tasks", skip_all)]
     pub async fn spawn_prover_tasks(
         &mut self,
         config: &MonitorConfig,
@@ -180,6 +185,7 @@ impl Tasks {
     }
 
     /// Spawn the faucet testing task.
+    #[instrument(target = COMPONENT, name = "tasks.spawn-faucet", skip_all)]
     pub fn spawn_faucet(&mut self, config: &MonitorConfig) -> Receiver<ServiceStatus> {
         let current_time = current_unix_timestamp_secs();
 
@@ -214,7 +220,52 @@ impl Tasks {
         faucet_rx
     }
 
+    /// Spawn the network transaction service checker task.
+    #[instrument(target = COMPONENT, name = "tasks.spawn-ntx-service", skip_all)]
+    pub async fn spawn_ntx_service(
+        &mut self,
+        config: &MonitorConfig,
+    ) -> Result<Receiver<ServiceStatus>> {
+        // Ensure accounts exist before starting monitoring tasks
+        ensure_accounts_exist(&config.wallet_filepath, &config.counter_filepath, &config.rpc_url)
+            .await?;
+
+        let current_time = current_unix_timestamp_secs();
+
+        // Create initial counter increment status
+        let initial_ntx_service_status = ServiceStatus {
+            name: "Network Transactions".to_string(),
+            status: crate::status::Status::Unknown,
+            last_checked: current_time,
+            error: None,
+            details: crate::status::ServiceDetails::NtxService(
+                crate::counter::CounterIncrementDetails {
+                    success_count: 0,
+                    failure_count: 0,
+                    current_value: None,
+                    last_tx_id: None,
+                },
+            ),
+        };
+
+        // Spawn the network transaction service task
+        let (ntx_service_tx, ntx_service_rx) = watch::channel(initial_ntx_service_status);
+        let config = config.clone();
+        let id = self
+            .handles
+            .spawn(async move {
+                Box::pin(run_ntx_service_task(config, ntx_service_tx))
+                    .await
+                    .expect("Network transaction service runs indefinitely");
+            })
+            .id();
+        self.names.insert(id, "ntx-service".to_string());
+
+        Ok(ntx_service_rx)
+    }
+
     /// Spawn the HTTP frontend server.
+    #[instrument(target = COMPONENT, name = "tasks.spawn-frontend", skip_all)]
     pub fn spawn_http_server(&mut self, server_state: ServerState, config: &MonitorConfig) {
         let config = config.clone();
         let id = self.handles.spawn(async move { serve(server_state, config).await }).id();
