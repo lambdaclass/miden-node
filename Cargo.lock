@@ -514,9 +514,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.2.44"
+version = "1.2.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37521ac7aabe3d13122dc382493e20c9416f299d2ccd5b3a5340a2570cdeb0f3"
+checksum = "35900b6c8d709fb1d854671ae27aeaa9eec2f8b01b364e1619a40da3e6fe2afe"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2148,22 +2148,22 @@ checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
 name = "jiff"
-version = "0.2.15"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be1f93b8b1eb69c77f24bbb0afdf66f54b632ee39af40ca21c4365a1d7347e49"
+checksum = "49cce2b81f2098e7e3efc35bc2e0a6b7abec9d34128283d7a26fa8f32a6dbb35"
 dependencies = [
  "jiff-static",
  "log",
  "portable-atomic",
  "portable-atomic-util",
- "serde",
+ "serde_core",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.15"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03343451ff899767262ec32146f6d559dd759fdadf42ff0e227c7c48f72594b4"
+checksum = "980af8b43c3ad5d8d349ace167ec8170839f753a42d233ba19e08afe1850fa69"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2510,9 +2510,9 @@ dependencies = [
 
 [[package]]
 name = "miden-crypto"
-version = "0.18.1"
+version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffd4233803234f287596d9a60c67c4e5762f792eb0dd20969a41c8db093d6126"
+checksum = "7eb82051002f9c64878d3b105a7b924de1ee92019231923380cf4ecd7b824f9a"
 dependencies = [
  "blake3",
  "cc",
@@ -2542,9 +2542,9 @@ dependencies = [
 
 [[package]]
 name = "miden-crypto-derive"
-version = "0.18.1"
+version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f70dccd82a2b2787b9bfc64687cd224dfe0adc0d21ae9b241b0c6edc4a23335"
+checksum = "2222f37355ea975f40acd3c098a437574a31a4d8a2c193cf4e9fead2beede577"
 dependencies = [
  "quote",
  "syn 2.0.109",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "miden-network-monitor"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "clap 4.5.51",
@@ -2698,7 +2698,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-block-producer"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -2734,7 +2734,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-grpc-error-macro"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "quote",
  "syn 2.0.109",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-ntx-builder"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -2764,7 +2764,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-proto"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "fs-err",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-proto-build"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "fs-err",
  "miette",
@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-rpc"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-store"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -2865,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-stress-test"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "clap 4.5.51",
  "fs-err",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-utils"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2924,7 +2924,7 @@ dependencies = [
 
 [[package]]
 name = "miden-node-validator"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "miden-node-proto",
@@ -2999,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "miden-remote-prover"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "miden-remote-prover-client"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "getrandom 0.3.4",
  "miden-node-proto-build",
@@ -3487,9 +3487,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openssl"
-version = "0.10.74"
+version = "0.10.75"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24ad14dd45412269e1a30f52ad8f0664f0f4f4a89ee8fe28c3b3527021ebb654"
+checksum = "08838db121398ad17ab8531ce9de97b244589089e290a384c900cb9ff7434328"
 dependencies = [
  "bitflags 2.10.0",
  "cfg-if",
@@ -3519,9 +3519,9 @@ checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.110"
+version = "0.9.111"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a9f0075ba3c21b09f8e8b2026584b1d18d49388648f2fbbf3c97ea8deced8e2"
+checksum = "82cab2d520aa75e3c58898289429321eb788c3106963d0dc886ec7a5f4adc321"
 dependencies = [
  "cc",
  "libc",
