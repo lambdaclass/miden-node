@@ -1,8 +1,6 @@
 # Changelog
 
-## v0.12.2 (TBD)
-
-### Fixes
+## v0.12.2 (2025-11-12)
 
 - Fixed `PoW` challenge solving in `miden-network-monitor` binary ([#1363](https://github.com/0xMiden/miden-node/pull/1363)).
 
