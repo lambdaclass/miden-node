@@ -2735,6 +2735,7 @@ dependencies = [
  "anyhow",
  "futures",
  "lru 0.16.2",
+ "miden-lib",
  "miden-node-proto",
  "miden-node-test-macro",
  "miden-node-utils",
