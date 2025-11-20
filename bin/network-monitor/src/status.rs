@@ -5,7 +5,11 @@
 
 use std::time::Duration;
 
-use miden_node_proto::clients::{Builder as ClientBuilder, RemoteProverProxy, Rpc};
+use miden_node_proto::clients::{
+    Builder as ClientBuilder,
+    RemoteProverProxyStatusClient,
+    RpcClient,
+};
 use miden_node_proto::generated as proto;
 use miden_node_proto::generated::block_producer::BlockProducerStatus;
 use miden_node_proto::generated::rpc::RpcStatus;
@@ -241,7 +245,8 @@ pub async fn run_rpc_status_task(
         .with_timeout(request_timeout)
         .without_metadata_version()
         .without_metadata_genesis()
-        .connect_lazy::<Rpc>();
+        .without_otel_context_injection()
+        .connect_lazy::<RpcClient>();
 
     let mut interval = tokio::time::interval(status_check_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -334,7 +339,8 @@ pub async fn run_remote_prover_status_task(
         .with_timeout(request_timeout)
         .without_metadata_version()
         .without_metadata_genesis()
-        .connect_lazy::<RemoteProverProxy>();
+        .without_otel_context_injection()
+        .connect_lazy::<RemoteProverProxyStatusClient>();
 
     let mut interval = tokio::time::interval(status_check_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
