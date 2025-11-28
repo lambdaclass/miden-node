@@ -36,6 +36,7 @@ use crate::errors::{
 };
 use crate::mempool::{BatchBudget, BlockBudget, Mempool, MempoolConfig, SharedMempool};
 use crate::store::StoreClient;
+use crate::validator::BlockProducerValidatorClient;
 use crate::{COMPONENT, SERVER_NUM_BATCH_BUILDERS};
 
 /// The block producer server.
@@ -49,6 +50,8 @@ pub struct BlockProducer {
     pub block_producer_address: SocketAddr,
     /// The address of the store component.
     pub store_url: Url,
+    /// The address of the validator component.
+    pub validator_url: Url,
     /// The address of the batch prover component.
     pub batch_prover_url: Option<Url>,
     /// The address of the block prover component.
@@ -81,6 +84,7 @@ impl BlockProducer {
     pub async fn serve(self) -> anyhow::Result<()> {
         info!(target: COMPONENT, endpoint=?self.block_producer_address, store=%self.store_url, "Initializing server");
         let store = StoreClient::new(self.store_url.clone());
+        let validator = BlockProducerValidatorClient::new(self.validator_url.clone());
 
         // Retry fetching the chain tip from the store until it succeeds.
         let mut retries_counter = 0;
@@ -118,7 +122,7 @@ impl BlockProducer {
         info!(target: COMPONENT, "Server initialized");
 
         let block_builder =
-            BlockBuilder::new(store.clone(), self.block_prover_url, self.block_interval);
+            BlockBuilder::new(store.clone(), validator, self.block_prover_url, self.block_interval);
         let batch_builder = BatchBuilder::new(
             store.clone(),
             SERVER_NUM_BATCH_BUILDERS,
