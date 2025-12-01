@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use miden_lib::AuthScheme;
 use miden_lib::account::interface::AccountInterface;
 use miden_lib::utils::ScriptBuilder;
-use miden_node_proto::clients::{Builder, RpcClient};
+use miden_node_proto::clients::RpcClient;
 use miden_node_proto::generated::shared::BlockHeaderByNumberRequest;
 use miden_node_proto::generated::transaction::ProvenTransaction;
 use miden_objects::account::auth::AuthSecretKey;
@@ -43,7 +43,7 @@ use tracing::{error, info, instrument, warn};
 
 use crate::COMPONENT;
 use crate::config::MonitorConfig;
-use crate::deploy::{MonitorDataStore, get_counter_library};
+use crate::deploy::{MonitorDataStore, create_genesis_aware_rpc_client, get_counter_library};
 use crate::status::{
     CounterTrackingDetails,
     IncrementDetails,
@@ -51,19 +51,6 @@ use crate::status::{
     ServiceStatus,
     Status,
 };
-
-async fn create_rpc_client(config: &MonitorConfig) -> Result<RpcClient> {
-    Builder::new(config.rpc_url.clone())
-        .with_tls()
-        .context("Failed to configure TLS for RPC client")
-        .expect("TLS is enabled")
-        .with_timeout(config.request_timeout)
-        .without_metadata_version()
-        .without_metadata_genesis()
-        .without_otel_context_injection()
-        .connect()
-        .await
-}
 
 /// Get the genesis block header.
 async fn get_genesis_block_header(rpc_client: &mut RpcClient) -> Result<BlockHeader> {
@@ -215,7 +202,8 @@ pub async fn run_increment_task(
     expected_counter_value: Arc<AtomicU64>,
 ) -> Result<()> {
     // Create RPC client
-    let mut rpc_client = create_rpc_client(&config).await?;
+    let mut rpc_client =
+        create_genesis_aware_rpc_client(&config.rpc_url, config.request_timeout).await?;
 
     let (
         mut details,
@@ -347,7 +335,8 @@ pub async fn run_counter_tracking_task(
     expected_counter_value: Arc<AtomicU64>,
 ) -> Result<()> {
     // Create RPC client
-    let mut rpc_client = create_rpc_client(&config).await?;
+    let mut rpc_client =
+        create_genesis_aware_rpc_client(&config.rpc_url, config.request_timeout).await?;
 
     // Load counter account to get the account ID
     let counter_account = match load_counter_account(&config.counter_filepath) {
