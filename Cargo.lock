@@ -2733,7 +2733,6 @@ version = "0.13.0"
 dependencies = [
  "anyhow",
  "futures",
- "lru 0.16.2",
  "miden-lib",
  "miden-node-proto",
  "miden-node-test-macro",
@@ -2892,6 +2891,7 @@ dependencies = [
  "http",
  "http-body-util",
  "itertools 0.14.0",
+ "lru 0.16.2",
  "miden-objects",
  "opentelemetry",
  "opentelemetry-otlp",
