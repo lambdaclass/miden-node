@@ -17,6 +17,7 @@
 - Add `S` generic to `NullifierTree` to allow usage with `LargeSmt`s ([#1353](https://github.com/0xMiden/miden-node/issues/1353)).
 - Added success rate to the `miden-network-monitor` binary ([#1420](https://github.com/0xMiden/miden-node/pull/1420)).
 - Removed internal errors from the `miden-network-monitor` ([#1424](https://github.com/0xMiden/miden-node/pull/1424)).
+- Added chain tip to the block producer status ([#1419](https://github.com/0xMiden/miden-node/pull/1419)).
 
 ### Fixes
 
