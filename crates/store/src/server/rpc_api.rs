@@ -274,7 +274,7 @@ impl rpc_server::Rpc for StoreApi {
 
         let note_ids: Vec<Word> = convert_digests_to_words::<GetNotesByIdError, _>(note_ids)?;
 
-        let note_ids: Vec<NoteId> = note_ids.into_iter().map(NoteId::new_unchecked).collect();
+        let note_ids: Vec<NoteId> = note_ids.into_iter().map(NoteId::from_raw).collect();
 
         let notes = self
             .state

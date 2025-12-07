@@ -9,7 +9,7 @@ use miden_lib::account::auth::AuthRpoFalcon512;
 use miden_lib::note::create_p2id_note;
 use miden_lib::transaction::TransactionKernel;
 use miden_node_proto::domain::account::AccountSummary;
-use miden_node_utils::fee::test_fee_params;
+use miden_node_utils::fee::{test_fee, test_fee_params};
 use miden_objects::account::auth::PublicKeyCommitment;
 use miden_objects::account::delta::AccountUpdateDetails;
 use miden_objects::account::{
@@ -317,7 +317,7 @@ fn sql_select_notes_different_execution_hints() {
     let res = queries::insert_notes(conn, &[(note_none, None)]);
     assert_eq!(res.unwrap(), 1, "One element must have been inserted");
 
-    let note_id = NoteId::new_unchecked(num_to_word(0));
+    let note_id = NoteId::from_raw(num_to_word(0));
     let note = &queries::select_notes_by_id(conn, &[note_id]).unwrap()[0];
 
     assert_eq!(note.metadata.execution_hint(), NoteExecutionHint::none());
@@ -343,7 +343,7 @@ fn sql_select_notes_different_execution_hints() {
     let res = queries::insert_notes(conn, &[(note_always, None)]);
     assert_eq!(res.unwrap(), 1, "One element must have been inserted");
 
-    let note_id = NoteId::new_unchecked(num_to_word(1));
+    let note_id = NoteId::from_raw(num_to_word(1));
     let note = &queries::select_notes_by_id(conn, &[note_id]).unwrap()[0];
     assert_eq!(note.metadata.execution_hint(), NoteExecutionHint::always());
 
@@ -367,7 +367,7 @@ fn sql_select_notes_different_execution_hints() {
 
     let res = queries::insert_notes(conn, &[(note_after_block, None)]);
     assert_eq!(res.unwrap(), 1, "One element must have been inserted");
-    let note_id = NoteId::new_unchecked(num_to_word(2));
+    let note_id = NoteId::from_raw(num_to_word(2));
     let note = &queries::select_notes_by_id(conn, &[note_id]).unwrap()[0];
     assert_eq!(
         note.metadata.execution_hint(),
@@ -1232,7 +1232,7 @@ fn notes() {
     // test query notes by id
     let notes = vec![note.clone(), note2];
 
-    let note_ids = Vec::from_iter(notes.iter().map(|note| NoteId::new_unchecked(note.note_id)));
+    let note_ids = Vec::from_iter(notes.iter().map(|note| NoteId::from_raw(note.note_id)));
 
     let res = queries::select_notes_by_id(conn, &note_ids).unwrap();
     assert_eq!(res, notes);
@@ -1405,7 +1405,7 @@ fn num_to_word(n: u64) -> Word {
 }
 
 fn num_to_nullifier(n: u64) -> Nullifier {
-    Nullifier::new_unchecked(num_to_word(n))
+    Nullifier::from_raw(num_to_word(n))
 }
 
 fn mock_block_account_update(account_id: AccountId, num: u64) -> BlockAccountUpdate {
@@ -1448,6 +1448,7 @@ fn mock_block_transaction(account_id: AccountId, num: u64) -> TransactionHeader 
         final_account_commitment,
         input_notes,
         output_notes,
+        test_fee(),
     )
 }
 
