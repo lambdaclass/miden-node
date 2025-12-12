@@ -934,7 +934,7 @@ impl State {
     ) -> Result<AccountProofResponse, DatabaseError> {
         let AccountProofRequest { block_num, account_id, details } = account_request;
 
-        if details.is_some() && !account_id.is_public() {
+        if details.is_some() && !account_id.has_public_state() {
             return Err(DatabaseError::AccountNotPublic(account_id));
         }
 
