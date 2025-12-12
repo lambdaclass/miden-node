@@ -37,7 +37,13 @@
 
 ## v0.12.6
 
+### Enhancements
+
 - Added Faucet metadata to the `miden-network-monitor` binary ([#1373](https://github.com/0xMiden/miden-node/pull/1373)).
+
+### Fixes
+
+- Block producer crash caused by pass through transactions ([#1396](https://github.com/0xMiden/miden-node/pull/1396)).
 
 ## v0.12.5 (2025-11-27)
 
