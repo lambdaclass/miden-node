@@ -46,7 +46,7 @@ use tracing::{Instrument, instrument};
 
 use crate::COMPONENT;
 use crate::actor::account_state::TransactionCandidate;
-use crate::rpc::RpcClient;
+use crate::block_producer::BlockProducerClient;
 use crate::store::StoreClient;
 
 #[derive(Debug, thiserror::Error)]
@@ -75,8 +75,7 @@ type NtxResult<T> = Result<T, NtxError>;
 /// Provides the context for execution [network transaction candidates](TransactionCandidate).
 #[derive(Clone)]
 pub struct NtxContext {
-    /// Client for submitting transactions to the network.
-    rpc_client: RpcClient,
+    block_producer: BlockProducerClient,
 
     /// The prover to delegate proofs to.
     ///
@@ -94,12 +93,17 @@ pub struct NtxContext {
 impl NtxContext {
     /// Creates a new [`NtxContext`] instance.
     pub fn new(
-        rpc_client: RpcClient,
+        block_producer: BlockProducerClient,
         prover: Option<RemoteTransactionProver>,
         store: StoreClient,
         script_cache: LruCache<Word, NoteScript>,
     ) -> Self {
-        Self { rpc_client, prover, store, script_cache }
+        Self {
+            block_producer,
+            prover,
+            store,
+            script_cache,
+        }
     }
 
     /// Executes a transaction end-to-end: filtering, executing, proving, and submitted to the block
@@ -143,7 +147,7 @@ impl NtxContext {
             .set_attribute("reference_block.number", chain_tip_header.block_num());
 
         async move {
-            Box::pin(async move {
+            async move {
                 let data_store = NtxDataStore::new(
                     account,
                     chain_tip_header,
@@ -153,15 +157,13 @@ impl NtxContext {
                 );
 
                 let notes = notes.into_iter().map(Note::from).collect::<Vec<_>>();
-                let (successful_notes, failed_notes) =
-                    self.filter_notes(&data_store, notes).await?;
-                let executed_tx = Box::pin(self.execute(&data_store, successful_notes)).await?;
-                let tx_inputs: TransactionInputs = executed_tx.into();
-                let proven_tx = Box::pin(self.prove(tx_inputs.clone())).await?;
-                let tx_id = proven_tx.id();
-                self.submit(proven_tx, tx_inputs).await?;
-                Ok((tx_id, failed_notes))
-            })
+                let (successful, failed) = self.filter_notes(&data_store, notes).await?;
+                let executed = Box::pin(self.execute(&data_store, successful)).await?;
+                let proven = Box::pin(self.prove(executed.into())).await?;
+                let tx_id = proven.id();
+                self.submit(proven).await?;
+                Ok((tx_id, failed))
+            }
             .in_current_span()
             .await
             .inspect_err(|err| tracing::Span::current().set_error(err))
@@ -254,11 +256,11 @@ impl NtxContext {
         .map_err(NtxError::Proving)
     }
 
-    /// Submits the transaction to the RPC server with transaction inputs.
+    /// Submits the transaction to the block producer.
     #[instrument(target = COMPONENT, name = "ntx.execute_transaction.submit", skip_all, err)]
-    async fn submit(&self, tx: ProvenTransaction, tx_inputs: TransactionInputs) -> NtxResult<()> {
-        self.rpc_client
-            .submit_proven_transaction(tx, tx_inputs)
+    async fn submit(&self, tx: ProvenTransaction) -> NtxResult<()> {
+        self.block_producer
+            .submit_proven_transaction(tx)
             .await
             .map_err(NtxError::Submission)
     }
