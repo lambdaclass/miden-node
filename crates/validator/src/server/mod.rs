@@ -8,7 +8,7 @@ use miden_node_proto::generated::{self as proto};
 use miden_node_proto_build::validator_api_descriptor;
 use miden_node_utils::panic::catch_panic_layer_fn;
 use miden_node_utils::tracing::grpc::grpc_trace_fn;
-use miden_objects::block::ProposedBlock;
+use miden_objects::block::{BlockSigner, ProposedBlock};
 use miden_objects::utils::{Deserializable, Serializable};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -23,16 +23,19 @@ use crate::COMPONENT;
 /// The handle into running the gRPC validator server.
 ///
 /// Facilitates the running of the gRPC server which implements the validator API.
-pub struct Validator {
+pub struct Validator<S> {
     /// The address of the validator component.
     pub address: SocketAddr,
     /// Server-side timeout for an individual gRPC request.
     ///
     /// If the handler takes longer than this duration, the server cancels the call.
     pub grpc_timeout: Duration,
+
+    /// The signer used to sign blocks.
+    pub signer: S,
 }
 
-impl Validator {
+impl<S: BlockSigner + Send + Sync + 'static> Validator<S> {
     /// Serves the validator RPC API.
     ///
     /// Executes in place (i.e. not spawned) and will run indefinitely until a fatal error is
@@ -63,7 +66,7 @@ impl Validator {
             .layer(CatchPanicLayer::custom(catch_panic_layer_fn))
             .layer(TraceLayer::new_for_grpc().make_span_with(grpc_trace_fn))
             .timeout(self.grpc_timeout)
-            .add_service(api_server::ApiServer::new(ValidatorServer {}))
+            .add_service(api_server::ApiServer::new(ValidatorServer { signer: self.signer }))
             .add_service(reflection_service)
             .add_service(reflection_service_alpha)
             .serve_with_incoming(TcpListenerStream::new(listener))
@@ -78,10 +81,12 @@ impl Validator {
 /// The underlying implementation of the gRPC validator server.
 ///
 /// Implements the gRPC API for the validator.
-struct ValidatorServer {}
+struct ValidatorServer<S> {
+    signer: S,
+}
 
 #[tonic::async_trait]
-impl api_server::Api for ValidatorServer {
+impl<S: BlockSigner + Send + Sync + 'static> api_server::Api for ValidatorServer<S> {
     /// Returns the status of the validator.
     async fn status(
         &self,
@@ -106,7 +111,7 @@ impl api_server::Api for ValidatorServer {
     async fn sign_block(
         &self,
         request: tonic::Request<proto::blockchain::ProposedBlock>,
-    ) -> Result<tonic::Response<proto::validator::SignedBlock>, tonic::Status> {
+    ) -> Result<tonic::Response<proto::blockchain::BlockSignature>, tonic::Status> {
         let proposed_block_bytes = request.into_inner().proposed_block;
 
         // Deserialize the proposed block.
@@ -117,20 +122,13 @@ impl api_server::Api for ValidatorServer {
                 ))
             })?;
 
-        // Build header and body
-        let (header, body) = build_block(proposed_block)
+        // Build and sign header.
+        let (header, _body) = build_block(proposed_block)
             .map_err(|err| tonic::Status::internal(format!("Failed to build block: {err}")))?;
+        let signature = self.signer.sign(&header);
 
-        // Convert to protobuf format
-        let header_proto = proto::blockchain::BlockHeader::from(&header);
-        let body_proto = proto::blockchain::BlockBody { block_body: body.to_bytes() };
-
-        // Both header and body are required fields and must always be populated
-        let response = proto::validator::SignedBlock {
-            header: Some(header_proto),
-            body: Some(body_proto),
-        };
-
+        // Send the signature.
+        let response = proto::blockchain::BlockSignature { signature: signature.to_bytes() };
         Ok(tonic::Response::new(response))
     }
 }

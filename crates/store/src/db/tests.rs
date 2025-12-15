@@ -34,6 +34,7 @@ use miden_objects::block::{
     BlockNoteTree,
     BlockNumber,
 };
+use miden_objects::crypto::dsa::ecdsa_k256_keccak::SecretKey;
 use miden_objects::crypto::merkle::SparseMerklePath;
 use miden_objects::crypto::rand::RpoRandomCoin;
 use miden_objects::note::{
@@ -54,6 +55,7 @@ use miden_objects::testing::account_id::{
     ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_IMMUTABLE_CODE,
     ACCOUNT_ID_REGULAR_PUBLIC_ACCOUNT_IMMUTABLE_CODE_2,
 };
+use miden_objects::testing::random_signer::RandomBlockSigner;
 use miden_objects::transaction::{
     InputNoteCommitment,
     InputNotes,
@@ -89,7 +91,7 @@ fn create_block(conn: &mut SqliteConnection, block_num: BlockNumber) {
         num_to_word(7),
         num_to_word(8),
         num_to_word(9),
-        num_to_word(10),
+        SecretKey::new().public_key(),
         test_fee_params(),
         11_u8.into(),
     );
@@ -855,7 +857,7 @@ fn db_block_header() {
         num_to_word(7),
         num_to_word(8),
         num_to_word(9),
-        num_to_word(10),
+        SecretKey::new().public_key(),
         test_fee_params(),
         11_u8.into(),
     );
@@ -887,7 +889,7 @@ fn db_block_header() {
         num_to_word(17),
         num_to_word(18),
         num_to_word(19),
-        num_to_word(20),
+        SecretKey::new().public_key(),
         test_fee_params(),
         21_u8.into(),
     );
@@ -1451,7 +1453,8 @@ fn genesis_with_account_assets() {
         .build_existing()
         .unwrap();
 
-    let genesis_state = GenesisState::new(vec![account], test_fee_params(), 1, 0);
+    let genesis_state =
+        GenesisState::new(vec![account], test_fee_params(), 1, 0, SecretKey::random());
     let genesis_block = genesis_state.into_block().unwrap();
 
     crate::db::Db::bootstrap(":memory:".into(), &genesis_block).unwrap();
@@ -1498,7 +1501,8 @@ fn genesis_with_account_storage_map() {
         .build_existing()
         .unwrap();
 
-    let genesis_state = GenesisState::new(vec![account], test_fee_params(), 1, 0);
+    let genesis_state =
+        GenesisState::new(vec![account], test_fee_params(), 1, 0, SecretKey::random());
     let genesis_block = genesis_state.into_block().unwrap();
 
     crate::db::Db::bootstrap(":memory:".into(), &genesis_block).unwrap();
@@ -1543,7 +1547,8 @@ fn genesis_with_account_assets_and_storage() {
         .build_existing()
         .unwrap();
 
-    let genesis_state = GenesisState::new(vec![account], test_fee_params(), 1, 0);
+    let genesis_state =
+        GenesisState::new(vec![account], test_fee_params(), 1, 0, SecretKey::random());
     let genesis_block = genesis_state.into_block().unwrap();
 
     crate::db::Db::bootstrap(":memory:".into(), &genesis_block).unwrap();
@@ -1612,8 +1617,13 @@ fn genesis_with_multiple_accounts() {
         .build_existing()
         .unwrap();
 
-    let genesis_state =
-        GenesisState::new(vec![account1, account2, account3], test_fee_params(), 1, 0);
+    let genesis_state = GenesisState::new(
+        vec![account1, account2, account3],
+        test_fee_params(),
+        1,
+        0,
+        SecretKey::random(),
+    );
     let genesis_block = genesis_state.into_block().unwrap();
 
     crate::db::Db::bootstrap(":memory:".into(), &genesis_block).unwrap();

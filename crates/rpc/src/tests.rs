@@ -20,6 +20,7 @@ use miden_objects::account::{
     AccountStorageMode,
     AccountType,
 };
+use miden_objects::crypto::dsa::ecdsa_k256_keccak::SecretKey;
 use miden_objects::testing::noop_auth_component::NoopAuthComponent;
 use miden_objects::transaction::ProvenTransactionBuilder;
 use miden_objects::utils::Serializable;
@@ -423,7 +424,9 @@ async fn start_store(store_addr: SocketAddr) -> (Runtime, TempDir, Word) {
     // Start the store.
     let data_directory = tempfile::tempdir().expect("tempdir should be created");
 
-    let (genesis_state, _) = GenesisConfig::default().into_state().unwrap();
+    let config = GenesisConfig::default();
+    let signer = SecretKey::new();
+    let (genesis_state, _) = config.into_state(signer).unwrap();
     Store::bootstrap(genesis_state.clone(), data_directory.path()).expect("store should bootstrap");
     let dir = data_directory.path().to_path_buf();
     let rpc_listener = TcpListener::bind(store_addr).await.expect("store should bind a port");
