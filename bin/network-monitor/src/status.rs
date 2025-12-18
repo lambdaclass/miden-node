@@ -104,6 +104,20 @@ pub struct CounterTrackingDetails {
     pub pending_increments: Option<u64>,
 }
 
+/// Details of the explorer service.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExplorerStatusDetails {
+    pub block_number: u64,
+    pub timestamp: u64,
+    pub number_of_transactions: u64,
+    pub number_of_nullifiers: u64,
+    pub number_of_notes: u64,
+    pub number_of_account_updates: u64,
+    pub block_commitment: String,
+    pub chain_commitment: String,
+    pub proof_commitment: String,
+}
+
 /// Details of a service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServiceDetails {
@@ -113,6 +127,7 @@ pub enum ServiceDetails {
     FaucetTest(FaucetTestDetails),
     NtxIncrement(IncrementDetails),
     NtxTracking(CounterTrackingDetails),
+    ExplorerStatus(ExplorerStatusDetails),
     Error,
 }
 
