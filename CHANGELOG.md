@@ -18,6 +18,7 @@
 - Added validated transactions check to block validation logc in Validator ([#1460](https://github.com/0xMiden/miden-node/pull/1460)).
 - Added explorer status to the `miden-network-monitor` binary ([#1450](https://github.com/0xMiden/miden-node/pull/1450)).
 - Added `GetLimits` endpoint to the RPC server ([#1410](https://github.com/0xMiden/miden-node/pull/1410)).
+- Added gRPC-Web probe support to the `miden-network-monitor` binary ([#1484](https://github.com/0xMiden/miden-node/pull/1484)).
 - Add DB schema change check ([#1268](https://github.com/0xMiden/miden-node/pull/1485)).
 
 ### Changes
