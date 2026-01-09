@@ -23,11 +23,11 @@ use miden_node_proto::domain::account::{
 use miden_node_proto::domain::batch::BatchInputs;
 use miden_node_utils::ErrorReport;
 use miden_node_utils::formatting::format_array;
-use miden_protocol::account::{AccountHeader, AccountId, StorageSlot, StorageSlotContent};
+use miden_protocol::account::{AccountId, StorageSlotContent};
 use miden_protocol::block::account_tree::{AccountTree, AccountWitness, account_id_to_smt_key};
 use miden_protocol::block::nullifier_tree::{NullifierTree, NullifierWitness};
 use miden_protocol::block::{BlockHeader, BlockInputs, BlockNumber, Blockchain, ProvenBlock};
-use miden_protocol::crypto::merkle::mmr::{Forest, Mmr, MmrDelta, MmrPeaks, MmrProof, PartialMmr};
+use miden_protocol::crypto::merkle::mmr::{Forest, MmrDelta, MmrPeaks, MmrProof, PartialMmr};
 use miden_protocol::crypto::merkle::smt::{
     LargeSmt,
     LargeSmtError,
@@ -100,7 +100,10 @@ where
     }
 }
 
-/// The rollup state
+// CHAIN STATE
+// ================================================================================================
+
+/// The rollup state.
 pub struct State {
     /// The database which stores block headers, nullifiers, notes, and the latest states of
     /// accounts.
@@ -120,6 +123,9 @@ pub struct State {
 }
 
 impl State {
+    // CONSTRUCTOR
+    // --------------------------------------------------------------------------------------------
+
     /// Loads the state from the `db`.
     #[instrument(target = COMPONENT, skip_all)]
     pub async fn load(data_path: &Path) -> Result<Self, StateInitializationError> {
@@ -136,27 +142,21 @@ impl State {
             .await
             .map_err(StateInitializationError::DatabaseLoadError)?;
 
-        let chain_mmr = load_mmr(&mut db).await?;
-        let block_headers = db.select_all_block_headers().await?;
-        let latest_block_num = block_headers
-            .last()
-            .map_or(BlockNumber::GENESIS, miden_protocol::block::BlockHeader::block_num);
+        let blockchain = load_mmr(&mut db).await?;
+        let latest_block_num = blockchain.chain_tip().unwrap_or(BlockNumber::GENESIS);
         let account_tree = load_account_tree(&mut db, latest_block_num).await?;
         let nullifier_tree = load_nullifier_tree(&mut db).await?;
 
-        let inner = RwLock::new(InnerState {
-            nullifier_tree,
-            // SAFETY: We assume the loaded MMR is valid and does not have more than u32::MAX
-            // entries.
-            blockchain: Blockchain::from_mmr_unchecked(chain_mmr),
-            account_tree,
-        });
+        let inner = RwLock::new(InnerState { nullifier_tree, blockchain, account_tree });
 
         let writer = Mutex::new(());
         let db = Arc::new(db);
 
         Ok(Self { db, block_store, inner, writer })
     }
+
+    // STATE MUTATOR
+    // --------------------------------------------------------------------------------------------
 
     /// Apply changes of a new block to the DB and in-memory data structures.
     ///
@@ -200,7 +200,7 @@ impl State {
         }
 
         let block_num = header.block_num();
-        let block_commitment = block.header().commitment();
+        let block_commitment = header.commitment();
 
         // ensures the right block header is being processed
         let prev_block = self
@@ -249,7 +249,7 @@ impl State {
                 .body()
                 .created_nullifiers()
                 .iter()
-                .filter(|&n| inner.nullifier_tree.get_block_num(n).is_some())
+                .filter(|&nullifier| inner.nullifier_tree.get_block_num(nullifier).is_some())
                 .copied()
                 .collect();
             if !duplicate_nullifiers.is_empty() {
@@ -417,6 +417,9 @@ impl State {
 
         Ok(())
     }
+
+    // STATE ACCESSORS
+    // --------------------------------------------------------------------------------------------
 
     /// Queries a [BlockHeader] from the database, and returns it alongside its inclusion proof.
     ///
@@ -936,7 +939,7 @@ impl State {
             return Err(DatabaseError::AccountNotPublic(account_id));
         }
 
-        let (block_num, witness) = self.get_block_witness(block_num, account_id).await?;
+        let (block_num, witness) = self.get_account_witness(block_num, account_id).await?;
 
         let details = if let Some(request) = details {
             Some(self.fetch_public_account_details(account_id, block_num, request).await?)
@@ -951,7 +954,7 @@ impl State {
     ///
     /// If `block_num` is provided, returns the witness at that historical block,
     /// if not present, returns the witness at the latest block.
-    async fn get_block_witness(
+    async fn get_account_witness(
         &self,
         block_num: Option<BlockNumber>,
         account_id: AccountId,
@@ -997,67 +1000,71 @@ impl State {
             storage_requests,
         } = detail_request;
 
-        let account_info = self.db.select_historical_account_at(account_id, block_num).await?;
+        if !account_id.has_public_state() {
+            return Err(DatabaseError::AccountNotPublic(account_id));
+        }
 
-        // If we get a query for a public account but the details are missing from the database,
-        // it indicates an inconsistent state in the database.
-        let Some(account) = account_info.details else {
-            return Err(DatabaseError::AccountDetailsMissing(account_id));
+        // Validate block exists in the blockchain before querying the database
+        self.validate_block_exists(block_num).await?;
+
+        let account_header = self
+            .db
+            .select_account_header_at_block(account_id, block_num)
+            .await?
+            .ok_or_else(|| DatabaseError::AccountNotPublic(account_id))?;
+
+        let account_code = match code_commitment {
+            Some(commitment) if commitment == account_header.code_commitment() => None,
+            Some(_) => {
+                self.db
+                    .select_account_code_by_commitment(account_header.code_commitment())
+                    .await?
+            },
+            None => None,
         };
 
-        let storage_header = account.storage().to_header();
+        let vault_details = match asset_vault_commitment {
+            Some(commitment) if commitment == account_header.vault_root() => {
+                AccountVaultDetails::empty()
+            },
+            Some(_) => {
+                let vault_assets =
+                    self.db.select_account_vault_at_block(account_id, block_num).await?;
+                AccountVaultDetails::from_assets(vault_assets)
+            },
+            None => AccountVaultDetails::empty(),
+        };
 
+        // TODO: don't load the entire storage at once, load what is required
+        let storage = self.db.select_account_storage_at_block(account_id, block_num).await?;
+        let storage_header = storage.to_header();
         let mut storage_map_details =
             Vec::<AccountStorageMapDetails>::with_capacity(storage_requests.len());
 
         for StorageMapRequest { slot_name, slot_data } in storage_requests {
-            let Some(StorageSlotContent::Map(storage_map)) =
-                account.storage().get(&slot_name).map(StorageSlot::content)
-            else {
-                return Err(AccountError::StorageSlotNotMap(slot_name).into());
+            let Some(slot) = storage.slots().iter().find(|s| s.name() == &slot_name) else {
+                continue;
             };
+
+            let storage_map = match slot.content() {
+                StorageSlotContent::Map(map) => map,
+                StorageSlotContent::Value(_) => {
+                    return Err(AccountError::StorageSlotNotMap(slot_name).into());
+                },
+            };
+
             let details = AccountStorageMapDetails::new(slot_name, slot_data, storage_map);
             storage_map_details.push(details);
         }
 
-        // Only include unknown account code blobs, which is equal to a account code digest
-        // mismatch. If `None` was requested, don't return any.
-        let account_code = code_commitment
-            .is_some_and(|code_commitment| code_commitment != account.code().commitment())
-            .then(|| account.code().to_bytes());
-
-        // storage details
-        let storage_details = AccountStorageDetails {
-            header: storage_header,
-            map_details: storage_map_details,
-        };
-
-        // Handle vault details based on the `asset_vault_commitment`.
-        // Similar to `code_commitment`, if the provided commitment matches, we don't return
-        // vault data. If no commitment is provided or it doesn't match, we return
-        // the vault data. If the number of vault contained assets are exceeding a
-        // limit, we signal this back in the response and the user must handle that
-        // in follow-up request.
-        let vault_details = match asset_vault_commitment {
-            Some(commitment) if commitment == account.vault().root() => {
-                // The client already has the correct vault data
-                AccountVaultDetails::empty()
-            },
-            Some(_) => {
-                // The commitment doesn't match, so return vault data
-                AccountVaultDetails::new(account.vault())
-            },
-            None => {
-                // No commitment provided, so don't return vault data
-                AccountVaultDetails::empty()
-            },
-        };
-
         Ok(AccountDetails {
-            account_header: AccountHeader::from(account),
+            account_header,
             account_code,
             vault_details,
-            storage_details,
+            storage_details: AccountStorageDetails {
+                header: storage_header,
+                map_details: storage_map_details,
+            },
         })
     }
 
@@ -1084,6 +1091,26 @@ impl State {
     /// Returns the latest block number.
     pub async fn latest_block_num(&self) -> BlockNumber {
         self.inner.read().await.latest_block_num()
+    }
+
+    /// Validates that a block exists in the blockchain
+    ///
+    /// # Attention
+    ///
+    /// Acquires a *read lock** on `self.inner`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DatabaseError::BlockNotFound` if the block doesn't exist in the blockchain.
+    async fn validate_block_exists(&self, block_num: BlockNumber) -> Result<(), DatabaseError> {
+        let inner = self.inner.read().await;
+        let latest_block_num = inner.latest_block_num();
+
+        if block_num > latest_block_num {
+            return Err(DatabaseError::BlockNotFound(block_num));
+        }
+
+        Ok(())
     }
 
     /// Runs database optimization.
@@ -1132,8 +1159,24 @@ impl State {
     }
 }
 
-// UTILITIES
+// INNER STATE LOADING
 // ================================================================================================
+
+#[instrument(level = "info", target = COMPONENT, skip_all)]
+async fn load_mmr(db: &mut Db) -> Result<Blockchain, StateInitializationError> {
+    let block_commitments: Vec<Word> = db
+        .select_all_block_headers()
+        .await?
+        .iter()
+        .map(BlockHeader::commitment)
+        .collect();
+
+    // SAFETY: We assume the loaded MMR is valid and does not have more than u32::MAX
+    // entries.
+    let chain_mmr = Blockchain::from_mmr_unchecked(block_commitments.into());
+
+    Ok(chain_mmr)
+}
 
 #[instrument(level = "info", target = COMPONENT, skip_all)]
 async fn load_nullifier_tree(
@@ -1150,23 +1193,11 @@ async fn load_nullifier_tree(
 }
 
 #[instrument(level = "info", target = COMPONENT, skip_all)]
-async fn load_mmr(db: &mut Db) -> Result<Mmr, StateInitializationError> {
-    let block_commitments: Vec<Word> = db
-        .select_all_block_headers()
-        .await?
-        .iter()
-        .map(BlockHeader::commitment)
-        .collect();
-
-    Ok(block_commitments.into())
-}
-
-#[instrument(level = "info", target = COMPONENT, skip_all)]
 async fn load_account_tree(
     db: &mut Db,
     block_number: BlockNumber,
 ) -> Result<AccountTreeWithHistory<MemoryStorage>, StateInitializationError> {
-    let account_data = db.select_all_account_commitments().await?.into_iter().collect::<Vec<_>>();
+    let account_data = Vec::from_iter(db.select_all_account_commitments().await?);
 
     let smt_entries = account_data
         .into_iter()
