@@ -23,6 +23,7 @@ use miden_node_proto::domain::account::{
 use miden_node_proto::domain::batch::BatchInputs;
 use miden_node_utils::ErrorReport;
 use miden_node_utils::formatting::format_array;
+use miden_protocol::account::delta::AccountUpdateDetails;
 use miden_protocol::account::{AccountId, StorageSlotContent};
 use miden_protocol::block::account_tree::{AccountTree, AccountWitness, account_id_to_smt_key};
 use miden_protocol::block::nullifier_tree::{NullifierTree, NullifierWitness};
@@ -42,6 +43,7 @@ use miden_protocol::{AccountError, Word};
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tracing::{info, info_span, instrument};
 
+use crate::accounts::{AccountTreeWithHistory, HistoricalError};
 use crate::blocks::BlockStore;
 use crate::db::models::Page;
 use crate::db::models::queries::StorageMapValuesPage;
@@ -65,7 +67,8 @@ use crate::errors::{
     StateInitializationError,
     StateSyncError,
 };
-use crate::{AccountTreeWithHistory, COMPONENT, DataDirectory};
+use crate::inner_forest::InnerForest;
+use crate::{COMPONENT, DataDirectory};
 
 // STRUCTURES
 // ================================================================================================
@@ -117,6 +120,9 @@ pub struct State {
     /// The lock is writer-preferring, meaning the writer won't be starved.
     inner: RwLock<InnerState>,
 
+    /// Forest-related state `(SmtForest, storage_map_roots, vault_roots)` with its own lock.
+    forest: RwLock<InnerForest>,
+
     /// To allow readers to access the tree data while an update in being performed, and prevent
     /// TOCTOU issues, there must be no concurrent writers. This locks to serialize the writers.
     writer: Mutex<()>,
@@ -146,13 +152,15 @@ impl State {
         let latest_block_num = blockchain.chain_tip().unwrap_or(BlockNumber::GENESIS);
         let account_tree = load_account_tree(&mut db, latest_block_num).await?;
         let nullifier_tree = load_nullifier_tree(&mut db).await?;
+        let forest = load_smt_forest(&mut db, latest_block_num).await?;
 
         let inner = RwLock::new(InnerState { nullifier_tree, blockchain, account_tree });
 
+        let forest = RwLock::new(forest);
         let writer = Mutex::new(());
         let db = Arc::new(db);
 
-        Ok(Self { db, block_store, inner, writer })
+        Ok(Self { db, block_store, inner, forest, writer })
     }
 
     // STATE MUTATOR
@@ -291,10 +299,10 @@ impl State {
                         .map(|update| (update.account_id(), update.final_state_commitment())),
                 )
                 .map_err(|e| match e {
-                    crate::HistoricalError::AccountTreeError(err) => {
+                    HistoricalError::AccountTreeError(err) => {
                         InvalidBlockError::NewBlockDuplicateAccountIdPrefix(err)
                     },
-                    crate::HistoricalError::MerkleError(_) => {
+                    HistoricalError::MerkleError(_) => {
                         panic!("Unexpected MerkleError during account tree mutation computation")
                     },
                 })?;
@@ -354,6 +362,16 @@ impl State {
         // Signals the write lock has been acquired, and the transaction can be committed
         let (inform_acquire_done, acquire_done) = oneshot::channel::<()>();
 
+        // Extract public account updates with deltas before block is moved into async task.
+        // Private accounts are filtered out since they don't expose their state changes.
+        let account_deltas =
+            Vec::from_iter(block.body().updated_accounts().iter().filter_map(|update| {
+                match update.details() {
+                    AccountUpdateDetails::Delta(delta) => Some(delta.clone()),
+                    AccountUpdateDetails::Private => None,
+                }
+            }));
+
         // The DB and in-memory state updates need to be synchronized and are partially
         // overlapping. Namely, the DB transaction only proceeds after this task acquires the
         // in-memory write lock. This requires the DB update to run concurrently, so a new task is
@@ -412,6 +430,8 @@ impl State {
                 .expect("Unreachable: old account tree root must be checked before this step");
             inner.blockchain.push(block_commitment);
         }
+
+        self.forest.write().await.apply_block_updates(block_num, account_deltas)?;
 
         info!(%block_commitment, block_num = block_num.as_u32(), COMPONENT, "apply_block successful");
 
@@ -1007,11 +1027,11 @@ impl State {
         // Validate block exists in the blockchain before querying the database
         self.validate_block_exists(block_num).await?;
 
-        let account_header = self
-            .db
-            .select_account_header_at_block(account_id, block_num)
-            .await?
-            .ok_or_else(|| DatabaseError::AccountNotPublic(account_id))?;
+        let account_header =
+            self.db
+                .select_account_header_at_block(account_id, block_num)
+                .await?
+                .ok_or(DatabaseError::AccountAtBlockHeightNotFoundInDb(account_id, block_num))?;
 
         let account_code = match code_commitment {
             Some(commitment) if commitment == account_header.code_commitment() => None,
@@ -1121,7 +1141,6 @@ impl State {
     ) -> Result<(BlockNumber, Vec<AccountVaultValue>), DatabaseError> {
         self.db.get_account_vault_sync(account_id, block_range).await
     }
-
     /// Returns the network notes for an account that are unconsumed by a specified block number,
     /// along with the next pagination token.
     pub async fn get_unconsumed_network_notes_for_account(
@@ -1214,4 +1233,41 @@ async fn load_account_tree(
         AccountTree::new(smt).map_err(StateInitializationError::FailedToCreateAccountsTree)?;
 
     Ok(AccountTreeWithHistory::new(account_tree, block_number))
+}
+
+/// Loads SMT forest with storage map and vault Merkle paths for all public accounts.
+#[instrument(target = COMPONENT, skip_all, fields(block_num = %block_num))]
+async fn load_smt_forest(
+    db: &mut Db,
+    block_num: BlockNumber,
+) -> Result<InnerForest, StateInitializationError> {
+    use miden_protocol::account::delta::AccountDelta;
+
+    let public_account_ids = db.select_all_public_account_ids().await?;
+
+    // Acquire write lock once for the entire initialization
+    let mut forest = InnerForest::new();
+
+    // Process each account
+    for account_id in public_account_ids {
+        // Get the full account from the database
+        let account_info = db.select_account(account_id).await?;
+        let account = account_info.details.expect("public accounts always have details in DB");
+
+        // Convert the full account to a full-state delta
+        let delta =
+            AccountDelta::try_from(account).expect("accounts from DB should not have seeds");
+
+        // Use the unified update method (will recognize it's a full-state delta)
+        forest.update_account(block_num, &delta)?;
+
+        tracing::debug!(
+            target: COMPONENT,
+            %account_id,
+            %block_num,
+            "Initialized forest for account from DB"
+        );
+    }
+
+    Ok(forest)
 }

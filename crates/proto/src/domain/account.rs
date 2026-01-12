@@ -187,6 +187,52 @@ impl TryFrom<proto::rpc::account_proof_request::AccountDetailRequest> for Accoun
     }
 }
 
+impl TryFrom<proto::rpc::account_storage_details::AccountStorageMapDetails>
+    for AccountStorageMapDetails
+{
+    type Error = ConversionError;
+
+    fn try_from(
+        value: proto::rpc::account_storage_details::AccountStorageMapDetails,
+    ) -> Result<Self, Self::Error> {
+        use proto::rpc::account_storage_details::account_storage_map_details::map_entries::StorageMapEntry;
+        let proto::rpc::account_storage_details::AccountStorageMapDetails {
+            slot_name,
+            too_many_entries,
+            entries,
+        } = value;
+
+        let slot_name = StorageSlotName::new(slot_name)?;
+
+        let entries = if too_many_entries {
+            StorageMapEntries::LimitExceeded
+        } else {
+            let map_entries = if let Some(entries) = entries {
+                entries
+                    .entries
+                    .into_iter()
+                    .map(|entry| {
+                        let key = entry
+                            .key
+                            .ok_or(StorageMapEntry::missing_field(stringify!(key)))?
+                            .try_into()?;
+                        let value = entry
+                            .value
+                            .ok_or(StorageMapEntry::missing_field(stringify!(value)))?
+                            .try_into()?;
+                        Ok((key, value))
+                    })
+                    .collect::<Result<Vec<_>, ConversionError>>()?
+            } else {
+                Vec::new()
+            };
+            StorageMapEntries::Entries(map_entries)
+        };
+
+        Ok(Self { slot_name, entries })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageMapRequest {
     pub slot_name: StorageSlotName,
@@ -541,52 +587,6 @@ const fn storage_slot_type_to_raw(slot_type: StorageSlotType) -> u32 {
     match slot_type {
         StorageSlotType::Value => 0,
         StorageSlotType::Map => 1,
-    }
-}
-
-impl TryFrom<proto::rpc::account_storage_details::AccountStorageMapDetails>
-    for AccountStorageMapDetails
-{
-    type Error = ConversionError;
-
-    fn try_from(
-        value: proto::rpc::account_storage_details::AccountStorageMapDetails,
-    ) -> Result<Self, Self::Error> {
-        use proto::rpc::account_storage_details::account_storage_map_details::map_entries::StorageMapEntry;
-        let proto::rpc::account_storage_details::AccountStorageMapDetails {
-            slot_name,
-            too_many_entries,
-            entries,
-        } = value;
-
-        let slot_name = StorageSlotName::new(slot_name)?;
-
-        let entries = if too_many_entries {
-            StorageMapEntries::LimitExceeded
-        } else {
-            let map_entries = if let Some(entries) = entries {
-                entries
-                    .entries
-                    .into_iter()
-                    .map(|entry| {
-                        let key = entry
-                            .key
-                            .ok_or(StorageMapEntry::missing_field(stringify!(key)))?
-                            .try_into()?;
-                        let value = entry
-                            .value
-                            .ok_or(StorageMapEntry::missing_field(stringify!(value)))?
-                            .try_into()?;
-                        Ok((key, value))
-                    })
-                    .collect::<Result<Vec<_>, ConversionError>>()?
-            } else {
-                Vec::new()
-            };
-            StorageMapEntries::Entries(map_entries)
-        };
-
-        Ok(Self { slot_name, entries })
     }
 }
 

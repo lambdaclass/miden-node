@@ -299,7 +299,6 @@ pub(crate) fn select_all_account_commitments(
 /// ORDER BY
 ///     block_num ASC
 /// ```
-#[allow(dead_code)] // Will be used by InnerForest in next PR
 pub(crate) fn select_all_public_account_ids(
     conn: &mut SqliteConnection,
 ) -> Result<Vec<AccountId>, DatabaseError> {
