@@ -12,8 +12,8 @@ use miden_node_proto::domain::account::{
     AccountDetailRequest,
     AccountDetails,
     AccountInfo,
-    AccountProofRequest,
-    AccountProofResponse,
+    AccountRequest,
+    AccountResponse,
     AccountStorageDetails,
     AccountStorageMapDetails,
     AccountVaultDetails,
@@ -945,16 +945,20 @@ impl State {
         self.db.select_all_network_account_ids(block_range).await
     }
 
-    /// Returns the respective account proof with optional details, such as asset and storage
-    /// entries.
+    /// Returns an account witness and optionally account details at a specific block.
     ///
-    /// When `block_num` is provided, this method will return the account state at that specific
-    /// block using both the historical account tree witness and historical database state.
-    pub async fn get_account_proof(
+    /// The witness is a Merkle proof of inclusion in the account tree, proving the account's
+    /// state commitment. If `details` is requested, the method also returns the account's code,
+    /// vault assets, and storage data. Account details are only available for public accounts.
+    ///
+    /// If `block_num` is provided, returns the state at that historical block; otherwise, returns
+    /// the latest state. Note that historical states are only available for recent blocks close
+    /// to the chain tip.
+    pub async fn get_account(
         &self,
-        account_request: AccountProofRequest,
-    ) -> Result<AccountProofResponse, DatabaseError> {
-        let AccountProofRequest { block_num, account_id, details } = account_request;
+        account_request: AccountRequest,
+    ) -> Result<AccountResponse, DatabaseError> {
+        let AccountRequest { block_num, account_id, details } = account_request;
 
         if details.is_some() && !account_id.has_public_state() {
             return Err(DatabaseError::AccountNotPublic(account_id));
@@ -968,13 +972,13 @@ impl State {
             None
         };
 
-        Ok(AccountProofResponse { block_num, witness, details })
+        Ok(AccountResponse { block_num, witness, details })
     }
 
-    /// Gets the block witness (account tree proof) for the specified account
+    /// Returns an account witness (Merkle proof of inclusion in the account tree).
     ///
-    /// If `block_num` is provided, returns the witness at that historical block,
-    /// if not present, returns the witness at the latest block.
+    /// If `block_num` is provided, returns the witness at that historical block;
+    /// otherwise, returns the witness at the latest block.
     async fn get_account_witness(
         &self,
         block_num: Option<BlockNumber>,
