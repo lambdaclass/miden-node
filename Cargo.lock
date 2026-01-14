@@ -2749,6 +2749,7 @@ name = "miden-node-proto"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "assert_matches",
  "fs-err",
  "hex",
  "http",

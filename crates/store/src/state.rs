@@ -18,13 +18,15 @@ use miden_node_proto::domain::account::{
     AccountStorageMapDetails,
     AccountVaultDetails,
     NetworkAccountPrefix,
+    SlotData,
     StorageMapRequest,
 };
 use miden_node_proto::domain::batch::BatchInputs;
 use miden_node_utils::ErrorReport;
 use miden_node_utils::formatting::format_array;
+use miden_protocol::Word;
+use miden_protocol::account::AccountId;
 use miden_protocol::account::delta::AccountUpdateDetails;
-use miden_protocol::account::{AccountId, StorageSlotContent};
 use miden_protocol::block::account_tree::{AccountTree, AccountWitness, account_id_to_smt_key};
 use miden_protocol::block::nullifier_tree::{NullifierTree, NullifierWitness};
 use miden_protocol::block::{BlockHeader, BlockInputs, BlockNumber, Blockchain, ProvenBlock};
@@ -39,7 +41,6 @@ use miden_protocol::crypto::merkle::smt::{
 use miden_protocol::note::{NoteDetails, NoteId, NoteScript, Nullifier};
 use miden_protocol::transaction::{OutputNote, PartialBlockchain};
 use miden_protocol::utils::Serializable;
-use miden_protocol::{AccountError, Word};
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tracing::{info, info_span, instrument};
 
@@ -1008,6 +1009,10 @@ impl State {
     ///
     /// This method queries the database to fetch the account state and processes the detail
     /// request to return only the requested information.
+    ///
+    /// For specific key queries (`SlotData::MapKeys`), the forest is used to provide SMT proofs.
+    /// Returns an error if the forest doesn't have data for the requested slot.
+    /// All-entries queries (`SlotData::All`) use the forest to return all entries.
     async fn fetch_public_account_details(
         &self,
         account_id: AccountId,
@@ -1027,11 +1032,12 @@ impl State {
         // Validate block exists in the blockchain before querying the database
         self.validate_block_exists(block_num).await?;
 
-        let account_header =
-            self.db
-                .select_account_header_at_block(account_id, block_num)
-                .await?
-                .ok_or(DatabaseError::AccountAtBlockHeightNotFoundInDb(account_id, block_num))?;
+        // Query account header and storage header together in a single DB call
+        let (account_header, storage_header) = self
+            .db
+            .select_account_header_with_storage_header_at_block(account_id, block_num)
+            .await?
+            .ok_or(DatabaseError::AccountAtBlockHeightNotFoundInDb(account_id, block_num))?;
 
         let account_code = match code_commitment {
             Some(commitment) if commitment == account_header.code_commitment() => None,
@@ -1055,25 +1061,31 @@ impl State {
             None => AccountVaultDetails::empty(),
         };
 
-        // TODO: don't load the entire storage at once, load what is required
-        let storage = self.db.select_account_storage_at_block(account_id, block_num).await?;
-        let storage_header = storage.to_header();
         let mut storage_map_details =
             Vec::<AccountStorageMapDetails>::with_capacity(storage_requests.len());
 
+        // Use forest for storage map queries
+        let forest_guard = self.forest.read().await;
+
         for StorageMapRequest { slot_name, slot_data } in storage_requests {
-            let Some(slot) = storage.slots().iter().find(|s| s.name() == &slot_name) else {
-                continue;
+            let details = match &slot_data {
+                SlotData::MapKeys(keys) => forest_guard
+                    .open_storage_map(account_id, slot_name.clone(), block_num, keys)
+                    .ok_or_else(|| DatabaseError::StorageRootNotFound {
+                        account_id,
+                        slot_name: slot_name.to_string(),
+                        block_num,
+                    })?
+                    .map_err(DatabaseError::MerkleError)?,
+                SlotData::All => forest_guard
+                    .storage_map_entries(account_id, slot_name.clone(), block_num)
+                    .ok_or_else(|| DatabaseError::StorageRootNotFound {
+                        account_id,
+                        slot_name: slot_name.to_string(),
+                        block_num,
+                    })?,
             };
 
-            let storage_map = match slot.content() {
-                StorageSlotContent::Map(map) => map,
-                StorageSlotContent::Value(_) => {
-                    return Err(AccountError::StorageSlotNotMap(slot_name).into());
-                },
-            };
-
-            let details = AccountStorageMapDetails::new(slot_name, slot_data, storage_map);
             storage_map_details.push(details);
         }
 
