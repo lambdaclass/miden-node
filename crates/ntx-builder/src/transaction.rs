@@ -105,30 +105,35 @@ impl NtxContext {
     /// - Transaction execution.
     /// - Proof generation.
     /// - Submission to the network.
-    #[instrument(target = COMPONENT, name = "ntx.execute_transaction", skip_all, err)]
+    #[instrument(target = COMPONENT, name = "ntx.execute_transaction", skip_all)]
     pub fn execute_transaction(
         self,
         tx: TransactionCandidate,
-    ) -> impl FutureMaybeSend<NtxResult<Vec<FailedNote>>> {
+    ) -> impl FutureMaybeSend<Result<Vec<FailedNote>, (Vec<Note>, NtxError)>> {
         let TransactionCandidate {
             account,
             notes,
             chain_tip_header,
             chain_mmr,
         } = tx;
-        tracing::Span::current().set_attribute("account.id", account.id());
-        tracing::Span::current()
-            .set_attribute("account.id.network_prefix", account.id().prefix().to_string().as_str());
-        tracing::Span::current().set_attribute("notes.count", notes.len());
-        tracing::Span::current()
-            .set_attribute("reference_block.number", chain_tip_header.block_num());
+
+        let notes = notes.into_iter().map(Note::from).collect::<Vec<_>>();
+        let notes_copy = notes.clone();
 
         async move {
             async move {
+                let span = tracing::Span::current();
+                span.set_attribute("account.id", account.id());
+                span.set_attribute(
+                    "account.id.network_prefix",
+                    account.id().prefix().to_string().as_str(),
+                );
+                span.set_attribute("notes.count", notes.len());
+                span.set_attribute("reference_block.number", chain_tip_header.block_num());
+
                 let data_store =
                     NtxDataStore::new(account, chain_tip_header, chain_mmr, self.store.clone());
 
-                let notes = notes.into_iter().map(Note::from).collect::<Vec<_>>();
                 let (successful, failed) = self.filter_notes(&data_store, notes).await?;
                 let executed = Box::pin(self.execute(&data_store, successful)).await?;
                 let proven = Box::pin(self.prove(executed.into())).await?;
@@ -138,6 +143,7 @@ impl NtxContext {
             .in_current_span()
             .await
             .inspect_err(|err| tracing::Span::current().set_error(err))
+            .map_err(|err| (notes_copy, err))
         }
     }
 
