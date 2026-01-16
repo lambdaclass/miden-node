@@ -31,18 +31,19 @@ use miden_protocol::block::account_tree::{AccountTree, AccountWitness, account_i
 use miden_protocol::block::nullifier_tree::{NullifierTree, NullifierWitness};
 use miden_protocol::block::{BlockHeader, BlockInputs, BlockNumber, Blockchain, ProvenBlock};
 use miden_protocol::crypto::merkle::mmr::{Forest, MmrDelta, MmrPeaks, MmrProof, PartialMmr};
-use miden_protocol::crypto::merkle::smt::{
-    LargeSmt,
-    LargeSmtError,
-    MemoryStorage,
-    SmtProof,
-    SmtStorage,
-};
+#[cfg(not(feature = "rocksdb"))]
+use miden_protocol::crypto::merkle::smt::MemoryStorage;
+use miden_protocol::crypto::merkle::smt::{LargeSmt, LargeSmtError, SmtProof, SmtStorage};
 use miden_protocol::note::{NoteDetails, NoteId, NoteScript, Nullifier};
 use miden_protocol::transaction::{OutputNote, PartialBlockchain};
 use miden_protocol::utils::Serializable;
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tracing::{info, info_span, instrument};
+#[cfg(feature = "rocksdb")]
+use {
+    miden_crypto::merkle::smt::RocksDbStorage,
+    miden_protocol::crypto::merkle::smt::RocksDbConfig,
+};
 
 use crate::accounts::{AccountTreeWithHistory, HistoricalError};
 use crate::blocks::BlockStore;
@@ -82,8 +83,137 @@ pub struct TransactionInputs {
     pub new_account_id_prefix_is_unique: Option<bool>,
 }
 
+/// The storage backend for trees.
+#[cfg(feature = "rocksdb")]
+pub type TreeStorage = RocksDbStorage;
+#[cfg(not(feature = "rocksdb"))]
+pub type TreeStorage = MemoryStorage;
+
+/// Converts a `LargeSmtError` into a `StateInitializationError`.
+fn account_tree_large_smt_error_to_init_error(e: LargeSmtError) -> StateInitializationError {
+    match e {
+        LargeSmtError::Merkle(merkle_error) => {
+            StateInitializationError::DatabaseError(DatabaseError::MerkleError(merkle_error))
+        },
+        LargeSmtError::Storage(err) => {
+            StateInitializationError::AccountTreeIoError(err.as_report())
+        },
+    }
+}
+
+/// Loads an SMT from persistent storage.
+#[cfg(feature = "rocksdb")]
+fn load_smt<S: SmtStorage>(storage: S) -> Result<LargeSmt<S>, StateInitializationError> {
+    LargeSmt::new(storage).map_err(account_tree_large_smt_error_to_init_error)
+}
+
+/// Trait for loading trees from storage.
+///
+/// For `MemoryStorage`, the tree is rebuilt from database entries on each startup.
+/// For `RocksDbStorage`, the tree is loaded directly from disk (much faster for large trees).
+// TODO handle on disk rocksdb storage file being missing and/or corrupted.
+trait StorageLoader: SmtStorage + Sized {
+    /// Creates a storage backend for the given domain.
+    fn create(data_dir: &Path, domain: &'static str) -> Result<Self, StateInitializationError>;
+
+    /// Loads an account tree, either from persistent storage or by rebuilding from DB.
+    fn load_account_tree(
+        self,
+        db: &mut Db,
+    ) -> impl std::future::Future<Output = Result<LargeSmt<Self>, StateInitializationError>> + Send;
+
+    /// Loads a nullifier tree, either from persistent storage or by rebuilding from DB.
+    fn load_nullifier_tree(
+        self,
+        db: &mut Db,
+    ) -> impl std::future::Future<
+        Output = Result<NullifierTree<LargeSmt<Self>>, StateInitializationError>,
+    > + Send;
+}
+
+#[cfg(not(feature = "rocksdb"))]
+impl StorageLoader for MemoryStorage {
+    fn create(_data_dir: &Path, _domain: &'static str) -> Result<Self, StateInitializationError> {
+        Ok(MemoryStorage::default())
+    }
+
+    async fn load_account_tree(
+        self,
+        db: &mut Db,
+    ) -> Result<LargeSmt<Self>, StateInitializationError> {
+        let account_data = db.select_all_account_commitments().await?;
+        let smt_entries = account_data
+            .into_iter()
+            .map(|(id, commitment)| (account_id_to_smt_key(id), commitment));
+        LargeSmt::with_entries(self, smt_entries)
+            .map_err(account_tree_large_smt_error_to_init_error)
+    }
+
+    async fn load_nullifier_tree(
+        self,
+        db: &mut Db,
+    ) -> Result<NullifierTree<LargeSmt<Self>>, StateInitializationError> {
+        let nullifiers = db.select_all_nullifiers().await?;
+        let entries = nullifiers.into_iter().map(|info| (info.nullifier, info.block_num));
+        NullifierTree::with_storage_from_entries(self, entries)
+            .map_err(StateInitializationError::FailedToCreateNullifierTree)
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+impl StorageLoader for RocksDbStorage {
+    fn create(data_dir: &Path, domain: &'static str) -> Result<Self, StateInitializationError> {
+        let storage_path = data_dir.join(domain);
+        fs_err::create_dir_all(&storage_path)
+            .map_err(|e| StateInitializationError::AccountTreeIoError(e.to_string()))?;
+        RocksDbStorage::open(RocksDbConfig::new(storage_path))
+            .map_err(|e| StateInitializationError::AccountTreeIoError(e.to_string()))
+    }
+
+    async fn load_account_tree(
+        self,
+        db: &mut Db,
+    ) -> Result<LargeSmt<Self>, StateInitializationError> {
+        // If RocksDB storage has data, load from it directly
+        let has_data = self
+            .has_leaves()
+            .map_err(|e| StateInitializationError::AccountTreeIoError(e.to_string()))?;
+        if has_data {
+            return load_smt(self);
+        }
+
+        info!(target: COMPONENT, "RocksDB account tree storage is empty, populating from SQLite");
+        let account_data = db.select_all_account_commitments().await?;
+        let smt_entries = account_data
+            .into_iter()
+            .map(|(id, commitment)| (account_id_to_smt_key(id), commitment));
+        LargeSmt::with_entries(self, smt_entries)
+            .map_err(account_tree_large_smt_error_to_init_error)
+    }
+
+    async fn load_nullifier_tree(
+        self,
+        db: &mut Db,
+    ) -> Result<NullifierTree<LargeSmt<Self>>, StateInitializationError> {
+        // If RocksDB storage has data, load from it directly
+        let has_data = self
+            .has_leaves()
+            .map_err(|e| StateInitializationError::NullifierTreeIoError(e.to_string()))?;
+        if has_data {
+            let smt = load_smt(self)?;
+            return Ok(NullifierTree::new_unchecked(smt));
+        }
+
+        info!(target: COMPONENT, "RocksDB nullifier tree storage is empty, populating from SQLite");
+        let nullifiers = db.select_all_nullifiers().await?;
+        let entries = nullifiers.into_iter().map(|info| (info.nullifier, info.block_num));
+        NullifierTree::with_storage_from_entries(self, entries)
+            .map_err(StateInitializationError::FailedToCreateNullifierTree)
+    }
+}
+
 /// Container for state that needs to be updated atomically.
-struct InnerState<S = MemoryStorage>
+struct InnerState<S>
 where
     S: SmtStorage,
 {
@@ -92,10 +222,7 @@ where
     account_tree: AccountTreeWithHistory<S>,
 }
 
-impl<S> InnerState<S>
-where
-    S: SmtStorage,
-{
+impl<S: SmtStorage> InnerState<S> {
     /// Returns the latest block number.
     fn latest_block_num(&self) -> BlockNumber {
         self.blockchain
@@ -119,7 +246,7 @@ pub struct State {
     /// Read-write lock used to prevent writing to a structure while it is being used.
     ///
     /// The lock is writer-preferring, meaning the writer won't be starved.
-    inner: RwLock<InnerState>,
+    inner: RwLock<InnerState<TreeStorage>>,
 
     /// Forest-related state `(SmtForest, storage_map_roots, vault_roots)` with its own lock.
     forest: RwLock<InnerForest>,
@@ -133,7 +260,7 @@ impl State {
     // CONSTRUCTOR
     // --------------------------------------------------------------------------------------------
 
-    /// Loads the state from the `db`.
+    /// Loads the state from the data directory.
     #[instrument(target = COMPONENT, skip_all)]
     pub async fn load(data_path: &Path) -> Result<Self, StateInitializationError> {
         let data_directory = DataDirectory::load(data_path.to_path_buf())
@@ -151,8 +278,16 @@ impl State {
 
         let blockchain = load_mmr(&mut db).await?;
         let latest_block_num = blockchain.chain_tip().unwrap_or(BlockNumber::GENESIS);
-        let account_tree = load_account_tree(&mut db, latest_block_num).await?;
-        let nullifier_tree = load_nullifier_tree(&mut db).await?;
+
+        let account_storage = TreeStorage::create(data_path, "accounttree")?;
+        let smt = account_storage.load_account_tree(&mut db).await?;
+        let account_tree =
+            AccountTree::new(smt).map_err(StateInitializationError::FailedToCreateAccountsTree)?;
+        let account_tree = AccountTreeWithHistory::new(account_tree, latest_block_num);
+
+        let nullifier_storage = TreeStorage::create(data_path, "nullifiertree")?;
+        let nullifier_tree = nullifier_storage.load_nullifier_tree(&mut db).await?;
+
         let forest = load_smt_forest(&mut db, latest_block_num).await?;
 
         let inner = RwLock::new(InnerState { nullifier_tree, blockchain, account_tree });
@@ -1206,49 +1341,6 @@ async fn load_mmr(db: &mut Db) -> Result<Blockchain, StateInitializationError> {
     let chain_mmr = Blockchain::from_mmr_unchecked(block_commitments.into());
 
     Ok(chain_mmr)
-}
-
-#[instrument(level = "info", target = COMPONENT, skip_all)]
-async fn load_nullifier_tree(
-    db: &mut Db,
-) -> Result<NullifierTree<LargeSmt<MemoryStorage>>, StateInitializationError> {
-    let nullifiers = db.select_all_nullifiers().await?;
-
-    // Convert nullifier data to entries for NullifierTree
-    // The nullifier value format is: block_num
-    let entries = nullifiers.into_iter().map(|info| (info.nullifier, info.block_num));
-
-    NullifierTree::with_storage_from_entries(MemoryStorage::default(), entries)
-        .map_err(StateInitializationError::FailedToCreateNullifierTree)
-}
-
-#[instrument(level = "info", target = COMPONENT, skip_all)]
-async fn load_account_tree(
-    db: &mut Db,
-    block_number: BlockNumber,
-) -> Result<AccountTreeWithHistory<MemoryStorage>, StateInitializationError> {
-    let account_data = Vec::from_iter(db.select_all_account_commitments().await?);
-
-    let smt_entries = account_data
-        .into_iter()
-        .map(|(id, commitment)| (account_id_to_smt_key(id), commitment));
-
-    let smt =
-        LargeSmt::with_entries(MemoryStorage::default(), smt_entries).map_err(|e| match e {
-            LargeSmtError::Merkle(merkle_error) => {
-                StateInitializationError::DatabaseError(DatabaseError::MerkleError(merkle_error))
-            },
-            LargeSmtError::Storage(err) => {
-                // large_smt::StorageError is not `Sync` and hence `context` cannot be called
-                // which we want to and do
-                StateInitializationError::AccountTreeIoError(err.as_report())
-            },
-        })?;
-
-    let account_tree =
-        AccountTree::new(smt).map_err(StateInitializationError::FailedToCreateAccountsTree)?;
-
-    Ok(AccountTreeWithHistory::new(account_tree, block_number))
 }
 
 /// Loads SMT forest with storage map and vault Merkle paths for all public accounts.
