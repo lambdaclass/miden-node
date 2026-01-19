@@ -38,7 +38,7 @@ use miden_protocol::note::{NoteDetails, NoteId, NoteScript, Nullifier};
 use miden_protocol::transaction::{OutputNote, PartialBlockchain};
 use miden_protocol::utils::Serializable;
 use tokio::sync::{Mutex, RwLock, oneshot};
-use tracing::{info, info_span, instrument};
+use tracing::{Instrument, info, info_span, instrument};
 #[cfg(feature = "rocksdb")]
 use {
     miden_crypto::merkle::smt::RocksDbStorage,
@@ -373,8 +373,9 @@ impl State {
         // finalized blocks. So we should check for the latest block when getting block from
         // the store.
         let store = Arc::clone(&self.block_store);
-        let block_save_task =
-            tokio::spawn(async move { store.save_block(block_num, &block_data).await });
+        let block_save_task = tokio::spawn(
+            async move { store.save_block(block_num, &block_data).await }.in_current_span(),
+        );
 
         // scope to read in-memory data, compute mutations required for updating account
         // and nullifier trees, and validate the request
@@ -513,10 +514,10 @@ impl State {
         // in-memory write lock. This requires the DB update to run concurrently, so a new task is
         // spawned.
         let db = Arc::clone(&self.db);
-        let db_update_task =
-            tokio::spawn(
-                async move { db.apply_block(allow_acquire, acquire_done, block, notes).await },
-            );
+        let db_update_task = tokio::spawn(
+            async move { db.apply_block(allow_acquire, acquire_done, block, notes).await }
+                .in_current_span(),
+        );
 
         // Wait for the message from the DB update task, that we ready to commit the DB transaction
         acquired_allowed.await.map_err(ApplyBlockError::ClosedChannel)?;
@@ -525,7 +526,7 @@ impl State {
         block_save_task.await??;
 
         // Scope to update the in-memory data
-        {
+        async move {
             // We need to hold the write lock here to prevent inconsistency between the in-memory
             // state and the DB state. Thus, we need to wait for the DB update task to complete
             // successfully.
@@ -565,7 +566,11 @@ impl State {
                 .apply_mutations(account_tree_update)
                 .expect("Unreachable: old account tree root must be checked before this step");
             inner.blockchain.push(block_commitment);
+
+            Ok(())
         }
+        .in_current_span()
+        .await?;
 
         self.forest.write().await.apply_block_updates(block_num, account_deltas)?;
 
@@ -1282,6 +1287,11 @@ impl State {
         }
 
         Ok(())
+    }
+
+    /// Emits metrics for each database table's size.
+    pub async fn analyze_table_sizes(&self) -> Result<(), DatabaseError> {
+        self.db.analyze_table_sizes().await
     }
 
     /// Returns account vault updates for specified account within a block range.
