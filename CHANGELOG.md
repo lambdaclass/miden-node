@@ -61,11 +61,33 @@
 - Fixed `GetNetworkAccountIds` pagination to return the chain tip ([#1489](https://github.com/0xMiden/miden-node/pull/1489)).
 - Fixed the network monitor counter account to use the storage slot name ([#1501](https://github.com/0xMiden/miden-node/pull/1501)).
 
-## v0.12.6
+## v0.12.8 (2026-01-15)
+
+### Enhancements
+
+- Enable traces within database closures ([#1511](https://github.com/0xMiden/miden-node/pull/1511)).
+
+## v0.12.7 (2026-01-15)
+
+### Enhancements
+
+- Emit database table size metrics ([#1511](https://github.com/0xMiden/miden-node/pull/1511)).
+- Improved telemetry in the network transaction builder ([#1508](https://github.com/0xMiden/miden-node/pull/1508)).
+- Improved telemetry in the store's `apply_block` ([#1508](https://github.com/0xMiden/miden-node/pull/1508)).
+
+### Fixes
+
+- Network transaction builder now marks notes from any error as failed ([#1508](https://github.com/0xMiden/miden-node/pull/1508)).
+- Network transaction builder now adheres to note limit set by protocol ([#1508](https://github.com/0xMiden/miden-node/pull/1508)).
+- Race condition resolved in the store's `apply_block` ([#1508](https://github.com/0xMiden/miden-node/pull/1508)).
+  - This presented as a database locked error and in rare cases a desync between the mempool and store. 
+
+## v0.12.6 (2026-01-12)
 
 ### Enhancements
 
 - Added Faucet metadata to the `miden-network-monitor` binary ([#1373](https://github.com/0xMiden/miden-node/pull/1373)).
+- Improve telemetry in the store ([#1504](https://github.com/0xMiden/miden-node/pull/1504)).
 
 ### Fixes
 
