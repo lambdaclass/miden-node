@@ -265,7 +265,7 @@ pub mod vault_asset_witnesses_response {
         pub proof: ::core::option::Option<super::super::primitives::SmtOpening>,
     }
 }
-/// Request for a storage map witness for a specific account and storage entry.
+/// Request for a storage map witness for a specific account and storage slot.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StorageMapWitnessRequest {
     /// The account ID for which to retrieve the storage map witness.

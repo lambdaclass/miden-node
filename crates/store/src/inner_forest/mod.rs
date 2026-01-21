@@ -142,9 +142,7 @@ impl InnerForest {
             .map_or_else(Self::empty_smt_root, |(_, root)| *root)
     }
 
-    /// Retrieves a vault root for the specified account block number.
-    ///
-    /// Finds the most recent vault root before the specified block number for the account.
+    /// Retrieves a vault root for the specified account at or before the specified block.
     pub(crate) fn get_vault_root(
         &self,
         account_id: AccountId,
@@ -156,9 +154,7 @@ impl InnerForest {
             .map(|(_, root)| *root)
     }
 
-    /// Retrieves the storage map SMT root for an account slot at or before the given block.
-    ///
-    /// Finds the most recent storage map root at or before the specified block number.
+    /// Retrieves the storage map root for an account slot at or before the specified block.
     pub(crate) fn get_storage_map_root(
         &self,
         account_id: AccountId,

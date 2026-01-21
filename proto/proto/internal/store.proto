@@ -394,7 +394,7 @@ message VaultAssetWitnessesResponse {
 // GET STORAGE MAP WITNESS
 // ================================================================================================
 
-// Request for a storage map witness for a specific account and storage entry.
+// Request for a storage map witness for a specific account and storage slot.
 message StorageMapWitnessRequest {
     // The account ID for which to retrieve the storage map witness.
     account.AccountId account_id = 1;
