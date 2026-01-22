@@ -1228,13 +1228,11 @@ impl State {
     /// along with the next pagination token.
     pub async fn get_unconsumed_network_notes_for_account(
         &self,
-        network_account_prefix: u32,
+        account_id: AccountId,
         block_num: BlockNumber,
         page: Page,
     ) -> Result<(Vec<NoteRecord>, Page), DatabaseError> {
-        self.db
-            .select_unconsumed_network_notes(network_account_prefix, block_num, page)
-            .await
+        self.db.select_unconsumed_network_notes(account_id, block_num, page).await
     }
 
     /// Returns the script for a note by its root.
