@@ -3,18 +3,18 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use miden_node_utils::fee::test_fee;
-use miden_objects::account::AccountId;
-use miden_objects::asset::FungibleAsset;
-use miden_objects::block::BlockNumber;
-use miden_objects::note::{Note, Nullifier};
-use miden_objects::transaction::{
+use miden_protocol::account::AccountId;
+use miden_protocol::asset::FungibleAsset;
+use miden_protocol::block::BlockNumber;
+use miden_protocol::note::{Note, Nullifier};
+use miden_protocol::transaction::{
     InputNote,
     OutputNote,
     ProvenTransaction,
     ProvenTransactionBuilder,
 };
-use miden_objects::vm::ExecutionProof;
-use miden_objects::{Felt, ONE, Word};
+use miden_protocol::vm::ExecutionProof;
+use miden_protocol::{Felt, ONE, Word};
 use rand::Rng;
 
 use super::MockPrivateAccount;
@@ -109,7 +109,7 @@ impl MockProvenTxBuilder {
             .map(|index| {
                 let nullifier = Word::from([ONE, ONE, ONE, Felt::new(index)]);
 
-                Nullifier::from(nullifier)
+                Nullifier::from_raw(nullifier)
             })
             .collect();
 
@@ -131,7 +131,7 @@ impl MockProvenTxBuilder {
             .map(|note_index| {
                 let note = Note::mock_noop(Word::from([0, 0, 0, note_index]));
 
-                OutputNote::Header(*note.header())
+                OutputNote::Header(note.header().clone())
             })
             .collect();
 

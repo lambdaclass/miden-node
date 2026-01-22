@@ -138,6 +138,16 @@ pub struct MonitorConfig {
     )]
     pub counter_increment_interval: Duration,
 
+    /// Maximum time to wait for the counter update after submitting a transaction.
+    #[arg(
+        long = "counter-latency-timeout",
+        env = "MIDEN_MONITOR_COUNTER_LATENCY_TIMEOUT",
+        default_value = "2m",
+        value_parser = humantime::parse_duration,
+        help = "Maximum time to wait for a counter update after submitting a transaction"
+    )]
+    pub counter_latency_timeout: Duration,
+
     /// The timeout for the outgoing requests.
     #[arg(
         long = "request-timeout",
@@ -147,4 +157,25 @@ pub struct MonitorConfig {
         help = "The timeout for the outgoing requests"
     )]
     pub request_timeout: Duration,
+
+    /// The URL of the explorer service.
+    #[arg(
+        long = "explorer-url",
+        env = "MIDEN_MONITOR_EXPLORER_URL",
+        help = "The URL of the explorer service"
+    )]
+    pub explorer_url: Option<Url>,
+
+    /// Maximum time without a chain tip update before marking RPC as unhealthy.
+    ///
+    /// If the chain tip does not increment within this duration, the RPC service will be
+    /// marked as unhealthy with a stale chain tip error.
+    #[arg(
+        long = "stale-chain-tip-threshold",
+        env = "MIDEN_MONITOR_STALE_CHAIN_TIP_THRESHOLD",
+        default_value = "1m",
+        value_parser = humantime::parse_duration,
+        help = "Maximum time without a chain tip update before marking RPC as unhealthy"
+    )]
+    pub stale_chain_tip_threshold: Duration,
 }

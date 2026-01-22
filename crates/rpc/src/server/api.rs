@@ -1,15 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::Context;
-use miden_node_proto::clients::{
-    BlockProducer,
-    BlockProducerClient,
-    Builder,
-    StoreRpc,
-    StoreRpcClient,
-};
+use miden_node_proto::clients::{BlockProducerClient, Builder, StoreRpcClient, ValidatorClient};
 use miden_node_proto::errors::ConversionError;
+use miden_node_proto::generated::rpc::MempoolStats;
 use miden_node_proto::generated::rpc::api_server::{self, Api};
 use miden_node_proto::generated::{self as proto};
 use miden_node_proto::try_convert;
@@ -20,26 +15,20 @@ use miden_node_utils::limiter::{
     QueryParamNoteIdLimit,
     QueryParamNoteTagLimit,
     QueryParamNullifierLimit,
+    QueryParamStorageMapKeyTotalLimit,
 };
-use miden_objects::account::AccountId;
-use miden_objects::batch::ProvenBatch;
-use miden_objects::block::{BlockHeader, BlockNumber};
-use miden_objects::note::{Note, NoteRecipient, NoteScript};
-use miden_objects::transaction::{
-    OutputNote,
-    ProvenTransaction,
-    ProvenTransactionBuilder,
-    TransactionInputs,
-};
-use miden_objects::utils::serde::{Deserializable, Serializable};
-use miden_objects::{MIN_PROOF_SECURITY_LEVEL, Word};
+use miden_protocol::batch::ProvenBatch;
+use miden_protocol::block::{BlockHeader, BlockNumber};
+use miden_protocol::note::{Note, NoteRecipient, NoteScript};
+use miden_protocol::transaction::{OutputNote, ProvenTransaction, ProvenTransactionBuilder};
+use miden_protocol::utils::serde::{Deserializable, Serializable};
+use miden_protocol::{MIN_PROOF_SECURITY_LEVEL, Word};
 use miden_tx::TransactionVerifier;
 use tonic::{IntoRequest, Request, Response, Status};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info};
 use url::Url;
 
 use crate::COMPONENT;
-use crate::server::validator;
 
 // RPC SERVICE
 // ================================================================================================
@@ -47,11 +36,12 @@ use crate::server::validator;
 pub struct RpcService {
     store: StoreRpcClient,
     block_producer: Option<BlockProducerClient>,
+    validator: ValidatorClient,
     genesis_commitment: Option<Word>,
 }
 
 impl RpcService {
-    pub(super) fn new(store_url: Url, block_producer_url: Option<Url>) -> Self {
+    pub(super) fn new(store_url: Url, block_producer_url: Option<Url>, validator_url: Url) -> Self {
         let store = {
             info!(target: COMPONENT, store_endpoint = %store_url, "Initializing store client");
             Builder::new(store_url)
@@ -59,7 +49,8 @@ impl RpcService {
                 .without_timeout()
                 .without_metadata_version()
                 .without_metadata_genesis()
-                .connect_lazy::<StoreRpc>()
+                .with_otel_context_injection()
+                .connect_lazy::<StoreRpcClient>()
         };
 
         let block_producer = block_producer_url.map(|block_producer_url| {
@@ -73,12 +64,29 @@ impl RpcService {
                 .without_timeout()
                 .without_metadata_version()
                 .without_metadata_genesis()
-                .connect_lazy::<BlockProducer>()
+                .with_otel_context_injection()
+                .connect_lazy::<BlockProducerClient>()
         });
+
+        let validator = {
+            info!(
+                target: COMPONENT,
+                validator_endpoint = %validator_url,
+                "Initializing validator client",
+            );
+            Builder::new(validator_url)
+                .without_tls()
+                .without_timeout()
+                .without_metadata_version()
+                .without_metadata_genesis()
+                .with_otel_context_injection()
+                .connect_lazy::<ValidatorClient>()
+        };
 
         Self {
             store,
             block_producer,
+            validator,
             genesis_commitment: None,
         }
     }
@@ -103,7 +111,7 @@ impl RpcService {
         loop {
             let result = self
                 .get_block_header_by_number(
-                    proto::shared::BlockHeaderByNumberRequest {
+                    proto::rpc::BlockHeaderByNumberRequest {
                         block_num: Some(BlockNumber::GENESIS.as_u32()),
                         include_mmr_proof: None,
                     }
@@ -123,16 +131,16 @@ impl RpcService {
                     return Ok(header);
                 },
                 Err(err) if err.code() == tonic::Code::Unavailable => {
-                    // exponential backoff with base 500ms and max 30s
+                    // Exponential backoff with base 500ms and max 30s.
                     let backoff = Duration::from_millis(500)
-                        .saturating_mul(1 << retry_counter)
+                        .saturating_mul(1 << retry_counter.min(6))
                         .min(Duration::from_secs(30));
 
                     tracing::warn!(
                         ?backoff,
                         %retry_counter,
                         %err,
-                        "connection failed while subscribing to the mempool, retrying"
+                        "connection failed while fetching genesis header, retrying"
                     );
 
                     retry_counter += 1;
@@ -146,18 +154,10 @@ impl RpcService {
 
 #[tonic::async_trait]
 impl api_server::Api for RpcService {
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.check_nullifiers",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn check_nullifiers(
         &self,
-        request: Request<proto::rpc_store::NullifierList>,
-    ) -> Result<Response<proto::rpc_store::CheckNullifiersResponse>, Status> {
+        request: Request<proto::rpc::NullifierList>,
+    ) -> Result<Response<proto::rpc::CheckNullifiersResponse>, Status> {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         check::<QueryParamNullifierLimit>(request.get_ref().nullifiers.len())?;
@@ -172,18 +172,10 @@ impl api_server::Api for RpcService {
         self.store.clone().check_nullifiers(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.sync_nullifiers",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn sync_nullifiers(
         &self,
-        request: Request<proto::rpc_store::SyncNullifiersRequest>,
-    ) -> Result<Response<proto::rpc_store::SyncNullifiersResponse>, Status> {
+        request: Request<proto::rpc::SyncNullifiersRequest>,
+    ) -> Result<Response<proto::rpc::SyncNullifiersResponse>, Status> {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         check::<QueryParamNullifierLimit>(request.get_ref().nullifiers.len())?;
@@ -191,35 +183,19 @@ impl api_server::Api for RpcService {
         self.store.clone().sync_nullifiers(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.get_block_header_by_number",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn get_block_header_by_number(
         &self,
-        request: Request<proto::shared::BlockHeaderByNumberRequest>,
-    ) -> Result<Response<proto::shared::BlockHeaderByNumberResponse>, Status> {
+        request: Request<proto::rpc::BlockHeaderByNumberRequest>,
+    ) -> Result<Response<proto::rpc::BlockHeaderByNumberResponse>, Status> {
         info!(target: COMPONENT, request = ?request.get_ref());
 
         self.store.clone().get_block_header_by_number(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.sync_state",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn sync_state(
         &self,
-        request: Request<proto::rpc_store::SyncStateRequest>,
-    ) -> Result<Response<proto::rpc_store::SyncStateResponse>, Status> {
+        request: Request<proto::rpc::SyncStateRequest>,
+    ) -> Result<Response<proto::rpc::SyncStateResponse>, Status> {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         check::<QueryParamAccountIdLimit>(request.get_ref().account_ids.len())?;
@@ -228,35 +204,19 @@ impl api_server::Api for RpcService {
         self.store.clone().sync_state(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.sync_storage_maps",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn sync_storage_maps(
         &self,
-        request: Request<proto::rpc_store::SyncStorageMapsRequest>,
-    ) -> Result<Response<proto::rpc_store::SyncStorageMapsResponse>, Status> {
+        request: Request<proto::rpc::SyncStorageMapsRequest>,
+    ) -> Result<Response<proto::rpc::SyncStorageMapsResponse>, Status> {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         self.store.clone().sync_storage_maps(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.sync_notes",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn sync_notes(
         &self,
-        request: Request<proto::rpc_store::SyncNotesRequest>,
-    ) -> Result<Response<proto::rpc_store::SyncNotesResponse>, Status> {
+        request: Request<proto::rpc::SyncNotesRequest>,
+    ) -> Result<Response<proto::rpc::SyncNotesResponse>, Status> {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         check::<QueryParamNoteTagLimit>(request.get_ref().note_tags.len())?;
@@ -264,14 +224,6 @@ impl api_server::Api for RpcService {
         self.store.clone().sync_notes(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.get_notes_by_id",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn get_notes_by_id(
         &self,
         request: Request<proto::note::NoteIdList>,
@@ -293,31 +245,20 @@ impl api_server::Api for RpcService {
         self.store.clone().get_notes_by_id(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.sync_account_vault",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn sync_account_vault(
         &self,
-        request: tonic::Request<proto::rpc_store::SyncAccountVaultRequest>,
-    ) -> std::result::Result<
-        tonic::Response<proto::rpc_store::SyncAccountVaultResponse>,
-        tonic::Status,
-    > {
+        request: tonic::Request<proto::rpc::SyncAccountVaultRequest>,
+    ) -> std::result::Result<tonic::Response<proto::rpc::SyncAccountVaultResponse>, tonic::Status>
+    {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         self.store.clone().sync_account_vault(request).await
     }
 
-    #[instrument(parent = None, target = COMPONENT, name = "rpc.server.submit_proven_transaction", skip_all, err)]
     async fn submit_proven_transaction(
         &self,
         request: Request<proto::transaction::ProvenTransaction>,
-    ) -> Result<Response<proto::block_producer::SubmitProvenTransactionResponse>, Status> {
+    ) -> Result<Response<proto::blockchain::BlockNumber>, Status> {
         debug!(target: COMPONENT, request = ?request.get_ref());
 
         let Some(block_producer) = &self.block_producer else {
@@ -354,7 +295,7 @@ impl api_server::Api for RpcService {
                 let script = NoteScript::from_parts(mast, note.script().entrypoint());
                 let recipient =
                     NoteRecipient::new(note.serial_num(), script, note.inputs().clone());
-                let new_note = Note::new(note.assets().clone(), *note.metadata(), recipient);
+                let new_note = Note::new(note.assets().clone(), note.metadata().clone(), recipient);
                 OutputNote::Full(new_note)
             },
             other => other.clone(),
@@ -384,39 +325,18 @@ impl api_server::Api for RpcService {
         })?;
 
         // If transaction inputs are provided, re-execute the transaction to validate it.
-        if let Some(tx_inputs_bytes) = &request.transaction_inputs {
-            // Deserialize the transaction inputs.
-            let tx_inputs = TransactionInputs::read_from_bytes(tx_inputs_bytes).map_err(|err| {
-                Status::invalid_argument(err.as_report_context("Invalid transaction inputs"))
-            })?;
-            // Re-execute the transaction.
-            match validator::re_execute_transaction(tx_inputs).await {
-                Ok(_executed_tx) => {
-                    debug!(
-                        target = COMPONENT,
-                        tx_id = %tx.id().to_hex(),
-                        "Transaction re-execution successful"
-                    );
-                },
-                Err(e) => {
-                    warn!(
-                        target = COMPONENT,
-                        tx_id = %tx.id().to_hex(),
-                        error = %e,
-                        "Transaction re-execution failed, but continuing with submission"
-                    );
-                },
-            }
+        if request.transaction_inputs.is_some() {
+            // Re-execute the transaction via the Validator.
+            self.validator.clone().submit_proven_transaction(request.clone()).await?;
         }
 
         block_producer.clone().submit_proven_transaction(request).await
     }
 
-    #[instrument(parent = None, target = COMPONENT, name = "rpc.server.submit_proven_batch", skip_all, err)]
     async fn submit_proven_batch(
         &self,
         request: tonic::Request<proto::transaction::ProvenTransactionBatch>,
-    ) -> Result<tonic::Response<proto::block_producer::SubmitProvenBatchResponse>, Status> {
+    ) -> Result<tonic::Response<proto::blockchain::BlockNumber>, Status> {
         let Some(block_producer) = &self.block_producer else {
             return Err(Status::unavailable("Batch submission not available in read-only mode"));
         };
@@ -437,7 +357,8 @@ impl api_server::Api for RpcService {
                     let script = NoteScript::from_parts(mast, note.script().entrypoint());
                     let recipient =
                         NoteRecipient::new(note.serial_num(), script, note.inputs().clone());
-                    let new_note = Note::new(note.assets().clone(), *note.metadata(), recipient);
+                    let new_note =
+                        Note::new(note.assets().clone(), note.metadata().clone(), recipient);
                     OutputNote::Full(new_note)
                 },
                 other => other.clone(),
@@ -470,39 +391,6 @@ impl api_server::Api for RpcService {
         block_producer.clone().submit_proven_batch(request).await
     }
 
-    /// Returns details for public (public) account by id.
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.get_account_details",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
-    async fn get_account_details(
-        &self,
-        request: Request<proto::account::AccountId>,
-    ) -> std::result::Result<Response<proto::account::AccountDetails>, Status> {
-        debug!(target: COMPONENT, request = ?request.get_ref());
-
-        // Validating account using conversion:
-        let _account_id: AccountId = request
-            .get_ref()
-            .clone()
-            .try_into()
-            .map_err(|err| Status::invalid_argument(format!("Invalid account id: {err}")))?;
-
-        self.store.clone().get_account_details(request).await
-    }
-
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.get_block_by_number",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn get_block_by_number(
         &self,
         request: Request<proto::blockchain::BlockNumber>,
@@ -514,33 +402,36 @@ impl api_server::Api for RpcService {
         self.store.clone().get_block_by_number(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.get_account_proof",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
-    async fn get_account_proof(
+    async fn get_account(
         &self,
-        request: Request<proto::rpc_store::AccountProofRequest>,
-    ) -> Result<Response<proto::rpc_store::AccountProofResponse>, Status> {
+        request: Request<proto::rpc::AccountRequest>,
+    ) -> Result<Response<proto::rpc::AccountResponse>, Status> {
+        use proto::rpc::account_request::account_detail_request::storage_map_detail_request::{
+            SlotData::MapKeys as ProtoMapKeys,
+            SlotData::AllEntries as ProtoMapAllEntries
+        };
+
         let request = request.into_inner();
 
         debug!(target: COMPONENT, ?request);
 
-        self.store.clone().get_account_proof(request).await
+        // Validate total storage map key limit before forwarding to store
+        if let Some(details) = &request.details {
+            let total_keys: usize = details
+                .storage_maps
+                .iter()
+                .filter_map(|m| m.slot_data.as_ref())
+                .filter_map(|d| match d {
+                    ProtoMapKeys(keys) => Some(keys.map_keys.len()),
+                    ProtoMapAllEntries(_) => None,
+                })
+                .sum();
+            check::<QueryParamStorageMapKeyTotalLimit>(total_keys)?;
+        }
+
+        self.store.clone().get_account(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.status",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn status(
         &self,
         request: Request<()>,
@@ -562,53 +453,46 @@ impl api_server::Api for RpcService {
 
         Ok(Response::new(proto::rpc::RpcStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            store: store_status.or(Some(proto::rpc_store::StoreStatus {
+            store: store_status.or(Some(proto::rpc::StoreStatus {
                 status: "unreachable".to_string(),
                 chain_tip: 0,
                 version: "-".to_string(),
             })),
-            block_producer: block_producer_status.or(Some(
-                proto::block_producer::BlockProducerStatus {
-                    status: "unreachable".to_string(),
-                    version: "-".to_string(),
-                },
-            )),
+            block_producer: block_producer_status.or(Some(proto::rpc::BlockProducerStatus {
+                status: "unreachable".to_string(),
+                version: "-".to_string(),
+                chain_tip: 0,
+                mempool_stats: Some(MempoolStats::default()),
+            })),
             genesis_commitment: self.genesis_commitment.map(Into::into),
         }))
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.get_note_script_by_root",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn get_note_script_by_root(
         &self,
         request: Request<proto::note::NoteRoot>,
-    ) -> Result<Response<proto::shared::MaybeNoteScript>, Status> {
+    ) -> Result<Response<proto::rpc::MaybeNoteScript>, Status> {
         debug!(target: COMPONENT, request = ?request);
 
         self.store.clone().get_note_script_by_root(request).await
     }
 
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "rpc.server.sync_transactions",
-        skip_all,
-        ret(level = "debug"),
-        err
-    )]
     async fn sync_transactions(
         &self,
-        request: Request<proto::rpc_store::SyncTransactionsRequest>,
-    ) -> Result<Response<proto::rpc_store::SyncTransactionsResponse>, Status> {
+        request: Request<proto::rpc::SyncTransactionsRequest>,
+    ) -> Result<Response<proto::rpc::SyncTransactionsResponse>, Status> {
         debug!(target: COMPONENT, request = ?request);
 
         self.store.clone().sync_transactions(request).await
+    }
+
+    async fn get_limits(
+        &self,
+        request: Request<()>,
+    ) -> Result<Response<proto::rpc::RpcLimits>, Status> {
+        debug!(target: COMPONENT, request = ?request);
+
+        Ok(Response::new(RPC_LIMITS.clone()))
     }
 }
 
@@ -625,3 +509,47 @@ fn out_of_range_error<E: core::fmt::Display>(err: E) -> Status {
 fn check<Q: QueryParamLimiter>(n: usize) -> Result<(), Status> {
     <Q as QueryParamLimiter>::check(n).map_err(out_of_range_error)
 }
+
+/// Helper to build an [`EndpointLimits`](proto::rpc::EndpointLimits) from (name, limit) pairs.
+fn endpoint_limits(params: &[(&str, usize)]) -> proto::rpc::EndpointLimits {
+    proto::rpc::EndpointLimits {
+        parameters: params.iter().map(|(k, v)| ((*k).to_string(), *v as u32)).collect(),
+    }
+}
+
+/// Cached RPC query parameter limits.
+static RPC_LIMITS: LazyLock<proto::rpc::RpcLimits> = LazyLock::new(|| {
+    use {
+        QueryParamAccountIdLimit as AccountId,
+        QueryParamNoteIdLimit as NoteId,
+        QueryParamNoteTagLimit as NoteTag,
+        QueryParamNullifierLimit as Nullifier,
+        QueryParamStorageMapKeyTotalLimit as StorageMapKeyTotal,
+    };
+
+    proto::rpc::RpcLimits {
+        endpoints: std::collections::HashMap::from([
+            (
+                "CheckNullifiers".into(),
+                endpoint_limits(&[(Nullifier::PARAM_NAME, Nullifier::LIMIT)]),
+            ),
+            (
+                "SyncNullifiers".into(),
+                endpoint_limits(&[(Nullifier::PARAM_NAME, Nullifier::LIMIT)]),
+            ),
+            (
+                "SyncState".into(),
+                endpoint_limits(&[
+                    (AccountId::PARAM_NAME, AccountId::LIMIT),
+                    (NoteTag::PARAM_NAME, NoteTag::LIMIT),
+                ]),
+            ),
+            ("SyncNotes".into(), endpoint_limits(&[(NoteTag::PARAM_NAME, NoteTag::LIMIT)])),
+            ("GetNotesById".into(), endpoint_limits(&[(NoteId::PARAM_NAME, NoteId::LIMIT)])),
+            (
+                "GetAccount".into(),
+                endpoint_limits(&[(StorageMapKeyTotal::PARAM_NAME, StorageMapKeyTotal::LIMIT)]),
+            ),
+        ]),
+    }
+});

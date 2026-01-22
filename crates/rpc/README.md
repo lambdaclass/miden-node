@@ -15,10 +15,10 @@ The full gRPC method definitions can be found in the [proto](../proto/README.md)
 
 - [CheckNullifiers](#checknullifiers)
 - [SyncNullifiers](#syncnullifiers)
-- [GetAccountDetails](#getaccountdetails)
-- [GetAccountProofs](#getaccountproofs)
+- [GetAccount](#getaccount)
 - [GetBlockByNumber](#getblockbynumber)
 - [GetBlockHeaderByNumber](#getblockheaderbynumber)
+- [GetLimits](#getlimits)
 - [GetNotesById](#getnotesbyid)
 - [GetNoteScriptByRoot](#getnotescriptbyroot)
 - [SubmitProvenTransaction](#submitproventransaction)
@@ -36,6 +36,8 @@ The full gRPC method definitions can be found in the [proto](../proto/README.md)
 
 Returns a nullifier proof for each of the requested nullifiers.
 
+**Limits:** `nullifier` (1000)
+
 #### Error Handling
 
 When nullifier checking fails, detailed error information is provided through gRPC status details. The following error codes may be returned:
@@ -48,15 +50,13 @@ When nullifier checking fails, detailed error information is provided through gR
 
 ---
 
-### GetAccountDetails
+### GetAccount
 
-Returns the latest state of an account with the specified ID.
+Returns an account witness (Merkle proof of inclusion in the account tree) and optionally account details.
 
----
+The witness proves the account's state commitment in the account tree. If details are requested, the response also includes the account's header, code, vault assets, and storage data. Account details are only available for public accounts.
 
-### GetAccountProofs
-
-Returns the latest state proofs of the specified accounts.
+If `block_num` is provided, returns the state at that historical block; otherwise, returns the latest state.
 
 ---
 
@@ -73,9 +73,20 @@ authenticate the block's inclusion.
 
 ---
 
+### GetLimits
+
+Returns the query parameter limits configured for RPC endpoints.
+
+This endpoint allows clients to discover the maximum number of items that can be requested in a single call for
+various endpoints. The response contains a map of endpoint names to their parameter limits.
+
+---
+
 ### GetNotesById
 
 Returns a list of notes matching the provided note IDs.
+
+**Limits:** `note_id` (100)
 
 #### Error Handling
 
@@ -137,6 +148,8 @@ Clients should inspect both the gRPC status code and the detailed error code in 
 Returns nullifier synchronization data for a set of prefixes within a given block range. This method allows
 clients to efficiently track nullifier creation by retrieving only the nullifiers produced between two blocks.
 
+**Limits:** `nullifier` (1000)
+
 Caller specifies the `prefix_len` (currently only 16), the list of prefix values (`nullifiers`), and the block
 range (`from_start_block`, optional `to_end_block`). The response includes all matching nullifiers created within that
 range, the last block included in the response (`block_num`), and the current chain tip (`chain_tip`).
@@ -181,6 +194,8 @@ When account vault synchronization fails, detailed error information is provided
 
 Returns info which can be used by the client to sync up to the tip of chain for the notes they are interested in.
 
+**Limits:** `note_tag` (1000)
+
 Client specifies the `note_tags` they are interested in, and the block range from which to search for matching notes. The request will then return the next block containing any note matching the provided tags within the specified range.
 
 The response includes each note's metadata and inclusion proof.
@@ -204,6 +219,8 @@ When note synchronization fails, detailed error information is provided through 
 
 Returns info which can be used by the client to sync up to the latest state of the chain for the objects (accounts and
 notes) the client is interested in.
+
+**Limits:** `account_id` (1000), `note_tag` (1000)
 
 This request returns the next block containing requested data. It also returns `chain_tip` which is the latest block
 number in the chain. Client is expected to repeat these requests in a loop until

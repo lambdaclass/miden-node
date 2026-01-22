@@ -25,6 +25,7 @@ pub struct ServerState {
     pub faucet: Option<watch::Receiver<ServiceStatus>>,
     pub ntx_increment: Option<watch::Receiver<ServiceStatus>>,
     pub ntx_tracking: Option<watch::Receiver<ServiceStatus>>,
+    pub explorer: Option<watch::Receiver<ServiceStatus>>,
 }
 
 /// Runs the frontend server.
@@ -35,12 +36,12 @@ pub struct ServerState {
 ///
 /// * `server_state` - The server state containing watch receivers for all services.
 /// * `config` - The configuration of the network.
-#[instrument(target = COMPONENT, name = "frontend.serve", skip_all, fields(port = %config.port))]
 pub async fn serve(server_state: ServerState, config: MonitorConfig) {
     // build our application with routes
     let app = Router::new()
         // Serve embedded assets
         .route("/assets/index.css", get(serve_css))
+        .route("/assets/index.js", get(serve_js))
         .route("/assets/favicon.ico", get(serve_favicon))
         // Main dashboard route
         .route("/", get(get_dashboard))
@@ -76,6 +77,11 @@ async fn get_status(
     // Collect RPC status
     services.push(server_state.rpc.borrow().clone());
 
+    // Collect explorer status if available
+    if let Some(explorer_rx) = &server_state.explorer {
+        services.push(explorer_rx.borrow().clone());
+    }
+
     // Collect all remote prover statuses
     for (prover_status_rx, prover_test_rx) in &server_state.provers {
         services.push(prover_status_rx.borrow().clone());
@@ -106,6 +112,14 @@ async fn serve_css() -> Response {
     (
         [(header::CONTENT_TYPE, header::HeaderValue::from_static("text/css"))],
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/index.css")),
+    )
+        .into_response()
+}
+
+async fn serve_js() -> Response {
+    (
+        [(header::CONTENT_TYPE, header::HeaderValue::from_static("text/javascript"))],
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/index.js")),
     )
         .into_response()
 }

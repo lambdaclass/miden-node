@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -10,8 +9,10 @@ use miden_node_rpc::Rpc;
 use miden_node_store::Store;
 use miden_node_utils::grpc::UrlExt;
 use miden_node_validator::Validator;
+use miden_protocol::block::BlockSigner;
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey;
+use miden_protocol::utils::Deserializable;
 use tokio::net::TcpListener;
-use tokio::sync::Barrier;
 use tokio::task::JoinSet;
 use url::Url;
 
@@ -21,6 +22,8 @@ use crate::commands::{
     DEFAULT_TIMEOUT,
     ENV_ENABLE_OTEL,
     ENV_GENESIS_CONFIG_FILE,
+    ENV_VALIDATOR_INSECURE_SECRET_KEY,
+    INSECURE_VALIDATOR_KEY_HEX,
     NtxBuilderConfig,
     duration_to_human_readable_string,
 };
@@ -43,7 +46,17 @@ pub enum BundledCommand {
         accounts_directory: PathBuf,
         /// Constructs the genesis block from the given toml file.
         #[arg(long, env = ENV_GENESIS_CONFIG_FILE, value_name = "FILE")]
-        genesis_config_file: Option<PathBuf>,
+        genesis_config_file: PathBuf,
+        /// Insecure, hex-encoded validator secret key for development and testing purposes.
+        ///
+        /// If not provided, a predefined key is used.
+        #[arg(
+            long = "validator.insecure.secret-key",
+            env = ENV_VALIDATOR_INSECURE_SECRET_KEY,
+            value_name = "VALIDATOR_INSECURE_SECRET_KEY",
+            default_value = INSECURE_VALIDATOR_KEY_HEX
+        )]
+        validator_insecure_secret_key: String,
     },
 
     /// Runs all three node components in the same process.
@@ -82,6 +95,15 @@ pub enum BundledCommand {
             value_name = "DURATION"
         )]
         grpc_timeout: Duration,
+
+        /// Insecure, hex-encoded validator secret key for development and testing purposes.
+        #[arg(
+            long = "validator.insecure.secret-key",
+            env = ENV_VALIDATOR_INSECURE_SECRET_KEY,
+            value_name = "VALIDATOR_INSECURE_SECRET_KEY",
+            default_value = INSECURE_VALIDATOR_KEY_HEX
+        )]
+        validator_insecure_secret_key: String,
     },
 }
 
@@ -92,12 +114,14 @@ impl BundledCommand {
                 data_directory,
                 accounts_directory,
                 genesis_config_file,
+                validator_insecure_secret_key,
             } => {
                 // Currently the bundled bootstrap is identical to the store's bootstrap.
                 crate::commands::store::StoreCommand::Bootstrap {
                     data_directory,
                     accounts_directory,
                     genesis_config_file,
+                    validator_insecure_secret_key,
                 }
                 .handle()
                 .await
@@ -110,9 +134,19 @@ impl BundledCommand {
                 ntx_builder,
                 enable_otel: _,
                 grpc_timeout,
+                validator_insecure_secret_key,
             } => {
-                Self::start(rpc_url, data_directory, ntx_builder, block_producer, grpc_timeout)
-                    .await
+                let secret_key_bytes = hex::decode(validator_insecure_secret_key)?;
+                let signer = SecretKey::read_from_bytes(&secret_key_bytes)?;
+                Self::start(
+                    rpc_url,
+                    data_directory,
+                    ntx_builder,
+                    block_producer,
+                    grpc_timeout,
+                    signer,
+                )
+                .await
             },
         }
     }
@@ -124,8 +158,8 @@ impl BundledCommand {
         ntx_builder: NtxBuilderConfig,
         block_producer: BlockProducerConfig,
         grpc_timeout: Duration,
+        signer: impl BlockSigner + Send + Sync + 'static,
     ) -> anyhow::Result<()> {
-        let should_start_ntb = !ntx_builder.disabled;
         // Start listening on all gRPC urls so that inter-component connections can be created
         // before each component is fully started up.
         //
@@ -186,32 +220,28 @@ impl BundledCommand {
             })
             .id();
 
-        // A sync point between the ntb and block-producer components.
-        let checkpoint = if should_start_ntb {
-            Barrier::new(2)
-        } else {
-            Barrier::new(1)
-        };
-        let checkpoint = Arc::new(checkpoint);
+        let should_start_ntx_builder = !ntx_builder.disabled;
 
         // Start block-producer. The block-producer's endpoint is available after loading completes.
         let block_producer_id = join_set
             .spawn({
-                let checkpoint = Arc::clone(&checkpoint);
                 let store_url = Url::parse(&format!("http://{store_block_producer_address}"))
+                    .context("Failed to parse URL")?;
+                let validator_url = Url::parse(&format!("http://{validator_address}"))
                     .context("Failed to parse URL")?;
                 async move {
                     BlockProducer {
                         block_producer_address,
                         store_url,
+                        validator_url,
                         batch_prover_url: block_producer.batch_prover_url,
                         block_prover_url: block_producer.block_prover_url,
                         batch_interval: block_producer.batch_interval,
                         block_interval: block_producer.block_interval,
                         max_batches_per_block: block_producer.max_batches_per_block,
                         max_txs_per_batch: block_producer.max_txs_per_batch,
-                        production_checkpoint: checkpoint,
                         grpc_timeout,
+                        mempool_tx_capacity: block_producer.mempool_tx_capacity,
                     }
                     .serve()
                     .await
@@ -223,10 +253,14 @@ impl BundledCommand {
         let validator_id = join_set
             .spawn({
                 async move {
-                    Validator { address: validator_address, grpc_timeout }
-                        .serve()
-                        .await
-                        .context("failed while serving validator component")
+                    Validator {
+                        address: validator_address,
+                        grpc_timeout,
+                        signer,
+                    }
+                    .serve()
+                    .await
+                    .context("failed while serving validator component")
                 }
             })
             .id();
@@ -238,10 +272,13 @@ impl BundledCommand {
                     .context("Failed to parse URL")?;
                 let block_producer_url = Url::parse(&format!("http://{block_producer_address}"))
                     .context("Failed to parse URL")?;
+                let validator_url = Url::parse(&format!("http://{validator_address}"))
+                    .context("Failed to parse URL")?;
                 Rpc {
                     listener: grpc_rpc,
                     store_url,
                     block_producer_url: Some(block_producer_url),
+                    validator_url,
                     grpc_timeout,
                 }
                 .serve()
@@ -262,7 +299,9 @@ impl BundledCommand {
         let store_ntx_builder_url = Url::parse(&format!("http://{store_ntx_builder_address}"))
             .context("Failed to parse URL")?;
 
-        if should_start_ntb {
+        if should_start_ntx_builder {
+            let validator_url = Url::parse(&format!("http://{validator_address}"))
+                .context("Failed to parse URL")?;
             let id = join_set
                 .spawn(async move {
                     let block_producer_url =
@@ -271,11 +310,11 @@ impl BundledCommand {
                     NetworkTransactionBuilder::new(
                         store_ntx_builder_url,
                         block_producer_url,
+                        validator_url,
                         ntx_builder.tx_prover_url,
-                        ntx_builder.ticker_interval,
-                        checkpoint,
+                        ntx_builder.script_cache_size,
                     )
-                    .serve_new()
+                    .run()
                     .await
                     .context("failed while serving ntx builder component")
                 })

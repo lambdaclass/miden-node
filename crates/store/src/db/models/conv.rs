@@ -32,87 +32,109 @@
     on relevant platforms"
 )]
 
-use std::any::type_name;
-
-use miden_node_proto::domain::account::{NetworkAccountError, NetworkAccountPrefix};
-use miden_objects::Felt;
-use miden_objects::block::BlockNumber;
-use miden_objects::note::{NoteExecutionMode, NoteTag};
+use miden_node_proto::domain::account::NetworkAccountId;
+use miden_protocol::Felt;
+use miden_protocol::account::{StorageSlotName, StorageSlotType};
+use miden_protocol::block::BlockNumber;
+use miden_protocol::note::NoteTag;
 
 #[derive(Debug, thiserror::Error)]
-#[error("failed to convert a database value to it's in memory type {0}")]
-pub struct DatabaseTypeConversionError(&'static str);
+#[error("failed to convert from database type {from_type} into {into_type}")]
+pub struct DatabaseTypeConversionError {
+    source: Box<dyn std::error::Error + Send + Sync>,
+    from_type: &'static str,
+    into_type: &'static str,
+}
 
 /// Convert from and to it's database representation and back
 ///
 /// We do not assume sanity of DB types.
 pub(crate) trait SqlTypeConvert: Sized {
     type Raw: Sized;
-    type Error: std::error::Error + Send + Sync + 'static;
+
     fn to_raw_sql(self) -> Self::Raw;
-    fn from_raw_sql(_raw: Self::Raw) -> Result<Self, Self::Error>;
+    fn from_raw_sql(_raw: Self::Raw) -> Result<Self, DatabaseTypeConversionError>;
+
+    fn map_err<E: std::error::Error + Send + Sync + 'static>(
+        source: E,
+    ) -> DatabaseTypeConversionError {
+        DatabaseTypeConversionError {
+            source: Box::new(source),
+            from_type: std::any::type_name::<Self::Raw>(),
+            into_type: std::any::type_name::<Self>(),
+        }
+    }
 }
 
 impl SqlTypeConvert for BlockNumber {
     type Raw = i64;
-    type Error = DatabaseTypeConversionError;
-    fn from_raw_sql(raw: Self::Raw) -> Result<Self, Self::Error> {
-        u32::try_from(raw)
-            .map(BlockNumber::from)
-            .map_err(|_| DatabaseTypeConversionError(type_name::<BlockNumber>()))
+
+    fn from_raw_sql(raw: Self::Raw) -> Result<Self, DatabaseTypeConversionError> {
+        u32::try_from(raw).map(BlockNumber::from).map_err(Self::map_err)
     }
+
     fn to_raw_sql(self) -> Self::Raw {
         i64::from(self.as_u32())
     }
 }
 
-impl SqlTypeConvert for NetworkAccountPrefix {
-    type Raw = i64;
-    type Error = DatabaseTypeConversionError;
-    fn from_raw_sql(raw: Self::Raw) -> Result<Self, Self::Error> {
-        NetworkAccountPrefix::try_from(raw as u32)
-            .map_err(|_e| DatabaseTypeConversionError(type_name::<NetworkAccountError>()))
+/// Converts a network account ID to its 30-bit prefix for database indexing.
+#[inline(always)]
+pub(crate) fn network_account_id_to_prefix_sql(id: NetworkAccountId) -> i64 {
+    i64::from(id.prefix())
+}
+
+impl SqlTypeConvert for NoteTag {
+    type Raw = i32;
+
+    #[inline(always)]
+    fn from_raw_sql(raw: Self::Raw) -> Result<Self, DatabaseTypeConversionError> {
+        #[allow(clippy::cast_sign_loss)]
+        Ok(NoteTag::new(raw as u32))
     }
+
+    #[inline(always)]
     fn to_raw_sql(self) -> Self::Raw {
-        i64::from(self.inner())
+        self.as_u32() as i32
     }
 }
 
-impl SqlTypeConvert for NoteExecutionMode {
+impl SqlTypeConvert for StorageSlotType {
     type Raw = i32;
-    type Error = DatabaseTypeConversionError;
 
     #[inline(always)]
-    fn from_raw_sql(raw: Self::Raw) -> Result<Self, Self::Error> {
+    fn from_raw_sql(raw: Self::Raw) -> Result<Self, DatabaseTypeConversionError> {
+        #[derive(Debug, thiserror::Error)]
+        #[error("invalid storage slot type value {0}")]
+        struct ValueError(i32);
+
         Ok(match raw {
-            0 => Self::Network,
-            1 => Self::Local,
-            _ => return Err(DatabaseTypeConversionError(type_name::<NoteExecutionMode>())),
+            0 => StorageSlotType::Value,
+            1 => StorageSlotType::Map,
+            invalid => {
+                return Err(Self::map_err(ValueError(invalid)));
+            },
         })
     }
 
     #[inline(always)]
     fn to_raw_sql(self) -> Self::Raw {
         match self {
-            NoteExecutionMode::Network => 0,
-            NoteExecutionMode::Local => 1,
+            StorageSlotType::Value => 0,
+            StorageSlotType::Map => 1,
         }
     }
 }
 
-impl SqlTypeConvert for NoteTag {
-    type Raw = i32;
-    type Error = DatabaseTypeConversionError;
+impl SqlTypeConvert for StorageSlotName {
+    type Raw = String;
 
-    #[inline(always)]
-    fn from_raw_sql(raw: Self::Raw) -> Result<Self, Self::Error> {
-        #[allow(clippy::cast_sign_loss)]
-        Ok(NoteTag::from(raw as u32))
+    fn from_raw_sql(raw: Self::Raw) -> Result<Self, DatabaseTypeConversionError> {
+        StorageSlotName::new(raw).map_err(Self::map_err)
     }
 
-    #[inline(always)]
     fn to_raw_sql(self) -> Self::Raw {
-        u32::from(self) as i32
+        String::from(self)
     }
 }
 
@@ -130,23 +152,13 @@ pub(crate) fn nullifier_prefix_to_raw_sql(prefix: u16) -> i32 {
 }
 
 #[inline(always)]
-pub(crate) fn raw_sql_to_nonce(raw: i64) -> u64 {
+pub(crate) fn raw_sql_to_nonce(raw: i64) -> Felt {
     debug_assert!(raw >= 0);
-    raw as u64
+    Felt::new(raw as u64)
 }
 #[inline(always)]
 pub(crate) fn nonce_to_raw_sql(nonce: Felt) -> i64 {
     nonce.as_int() as i64
-}
-
-#[inline(always)]
-pub(crate) fn raw_sql_to_slot(raw: i32) -> u8 {
-    debug_assert!(raw >= 0);
-    raw as u8
-}
-#[inline(always)]
-pub(crate) fn slot_to_raw_sql(slot: u8) -> i32 {
-    i32::from(slot)
 }
 
 #[inline(always)]
@@ -166,24 +178,6 @@ pub(crate) fn raw_sql_to_note_type(raw: i32) -> u8 {
 #[inline(always)]
 pub(crate) fn note_type_to_raw_sql(note_type: u8) -> i32 {
     i32::from(note_type)
-}
-
-#[inline(always)]
-pub(crate) fn raw_sql_to_execution_hint(raw: i64) -> u64 {
-    raw as u64
-}
-#[inline(always)]
-pub(crate) fn execution_hint_to_raw_sql(hint: u64) -> i64 {
-    hint as i64
-}
-
-#[inline(always)]
-pub(crate) fn raw_sql_to_aux(raw: i64) -> Felt {
-    Felt::try_from(raw as u64).unwrap()
-}
-#[inline(always)]
-pub(crate) fn aux_to_raw_sql(hint: Felt) -> i64 {
-    hint.inner() as i64
 }
 
 #[inline(always)]

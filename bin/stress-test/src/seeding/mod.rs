@@ -6,28 +6,24 @@ use std::time::{Duration, Instant};
 use metrics::SeedingMetrics;
 use miden_air::ExecutionProof;
 use miden_block_prover::LocalBlockProver;
-use miden_lib::account::auth::AuthRpoFalcon512;
-use miden_lib::account::faucets::BasicFungibleFaucet;
-use miden_lib::account::wallets::BasicWallet;
-use miden_lib::note::create_p2id_note;
-use miden_lib::utils::Serializable;
 use miden_node_block_producer::store::StoreClient;
 use miden_node_proto::domain::batch::BatchInputs;
-use miden_node_proto::generated::rpc_store::rpc_client::RpcClient;
+use miden_node_proto::generated::store::rpc_client::RpcClient;
 use miden_node_store::{DataDirectory, GenesisState, Store};
 use miden_node_utils::tracing::grpc::OtelInterceptor;
-use miden_objects::account::delta::AccountUpdateDetails;
-use miden_objects::account::{
+use miden_protocol::account::delta::AccountUpdateDetails;
+use miden_protocol::account::{
     Account,
     AccountBuilder,
     AccountDelta,
     AccountId,
+    AccountStorage,
     AccountStorageMode,
     AccountType,
 };
-use miden_objects::asset::{Asset, FungibleAsset, TokenSymbol};
-use miden_objects::batch::{BatchAccountUpdate, BatchId, ProvenBatch};
-use miden_objects::block::{
+use miden_protocol::asset::{Asset, FungibleAsset, TokenSymbol};
+use miden_protocol::batch::{BatchAccountUpdate, BatchId, ProvenBatch};
+use miden_protocol::block::{
     BlockHeader,
     BlockInputs,
     BlockNumber,
@@ -35,10 +31,12 @@ use miden_objects::block::{
     ProposedBlock,
     ProvenBlock,
 };
-use miden_objects::crypto::dsa::rpo_falcon512::{PublicKey, SecretKey};
-use miden_objects::crypto::rand::RpoRandomCoin;
-use miden_objects::note::{Note, NoteHeader, NoteId, NoteInclusionProof};
-use miden_objects::transaction::{
+use miden_protocol::crypto::dsa::ecdsa_k256_keccak::SecretKey as EcdsaSecretKey;
+use miden_protocol::crypto::dsa::falcon512_rpo::{PublicKey, SecretKey};
+use miden_protocol::crypto::rand::RpoRandomCoin;
+use miden_protocol::errors::AssetError;
+use miden_protocol::note::{Note, NoteHeader, NoteId, NoteInclusionProof};
+use miden_protocol::transaction::{
     InputNote,
     InputNotes,
     OrderedTransactionHeaders,
@@ -47,7 +45,12 @@ use miden_objects::transaction::{
     ProvenTransactionBuilder,
     TransactionHeader,
 };
-use miden_objects::{AssetError, Felt, ONE, Word};
+use miden_protocol::utils::Serializable;
+use miden_protocol::{Felt, ONE, Word};
+use miden_standards::account::auth::AuthFalcon512Rpo;
+use miden_standards::account::faucets::BasicFungibleFaucet;
+use miden_standards::account::wallets::BasicWallet;
+use miden_standards::note::create_p2id_note;
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::prelude::ParallelSlice;
@@ -88,7 +91,8 @@ pub async fn seed_store(
     // generate the faucet account and the genesis state
     let faucet = create_faucet();
     let fee_params = FeeParameters::new(faucet.id(), 0).unwrap();
-    let genesis_state = GenesisState::new(vec![faucet.clone()], fee_params, 1, 1);
+    let signer = EcdsaSecretKey::new();
+    let genesis_state = GenesisState::new(vec![faucet.clone()], fee_params, 1, 1, signer);
     Store::bootstrap(genesis_state.clone(), &data_directory).expect("store should bootstrap");
 
     // start the store
@@ -245,8 +249,13 @@ async fn apply_block(
     store_client: &StoreClient,
     metrics: &mut SeedingMetrics,
 ) -> ProvenBlock {
-    let proposed_block = ProposedBlock::new(block_inputs, batches).unwrap();
-    let proven_block = LocalBlockProver::new(0).prove_dummy(proposed_block).unwrap();
+    let proposed_block = ProposedBlock::new(block_inputs.clone(), batches).unwrap();
+    let (header, body) = proposed_block.clone().into_header_and_body().unwrap();
+    let block_proof = LocalBlockProver::new(0)
+        .prove_dummy(proposed_block.batches().clone(), header.clone(), block_inputs)
+        .unwrap();
+    let signature = EcdsaSecretKey::new().sign(header.commitment());
+    let proven_block = ProvenBlock::new_unchecked(header, body, signature, block_proof);
     let block_size: usize = proven_block.to_bytes().len();
 
     let start = Instant::now();
@@ -305,8 +314,8 @@ fn create_note(faucet_id: AccountId, target_id: AccountId, rng: &mut RpoRandomCo
         faucet_id,
         target_id,
         vec![asset],
-        miden_objects::note::NoteType::Public,
-        Felt::default(),
+        miden_protocol::note::NoteType::Public,
+        miden_protocol::note::NoteAttachment::default(),
         rng,
     )
     .expect("note creation failed")
@@ -319,7 +328,7 @@ fn create_account(public_key: PublicKey, index: u64, storage_mode: AccountStorag
     AccountBuilder::new(init_seed.try_into().unwrap())
         .account_type(AccountType::RegularAccountImmutableCode)
         .storage_mode(storage_mode)
-        .with_auth_component(AuthRpoFalcon512::new(public_key.into()))
+        .with_auth_component(AuthFalcon512Rpo::new(public_key.into()))
         .with_component(BasicWallet)
         .build()
         .unwrap()
@@ -337,7 +346,7 @@ fn create_faucet() -> Account {
         .account_type(AccountType::FungibleFaucet)
         .storage_mode(AccountStorageMode::Private)
         .with_component(BasicFungibleFaucet::new(token_symbol, 2, Felt::new(u64::MAX)).unwrap())
-        .with_auth_component(AuthRpoFalcon512::new(key_pair.public_key().into()))
+        .with_auth_component(AuthFalcon512Rpo::new(key_pair.public_key().into()))
         .build()
         .unwrap()
 }
@@ -434,10 +443,11 @@ fn create_emit_note_tx(
 ) -> ProvenTransaction {
     let initial_account_hash = faucet.commitment();
 
-    let slot = faucet.storage().get_item(2).unwrap();
+    let metadata_slot_name = AccountStorage::faucet_sysdata_slot();
+    let slot = faucet.storage().get_item(metadata_slot_name).unwrap();
     faucet
         .storage_mut()
-        .set_item(0, [slot[0], slot[1], slot[2], slot[3] + Felt::new(10)].into())
+        .set_item(metadata_slot_name, [slot[0], slot[1], slot[2], slot[3] + Felt::new(10)].into())
         .unwrap();
 
     faucet.increment_nonce(ONE).unwrap();

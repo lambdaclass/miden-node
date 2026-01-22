@@ -16,20 +16,24 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Reduce cache usage by removing debug information.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
 jobs:
   typos:
-    runs-on: Linux-ARM64-Runner
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
         with:
-          tool: typos
+          tool: typos@1.42.0
       - run: make typos-check
 
   rustfmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@main
       - name: Rustup
@@ -44,9 +48,13 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@main
+      - name: Cleanup large tools for build space
+        uses: ./.github/actions/cleanup-runner
+      - name: Install RocksDB
+        uses: ./.github/actions/install-rocksdb
       - name: Rustup
         run: |
           rustup update --no-self-update
@@ -58,42 +66,46 @@ jobs:
         run: make clippy
 
   toml:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
         with:
-          tool: taplo-cli
+          tool: taplo-cli@0.10.0
       - run: make toml-check
 
   workspace-lints:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-workspace-lints
+          tool: cargo-workspace-lints@0.1.4
       - run: |
           make workspace-check
 
   doc:
     name: doc
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@main
+      - name: Cleanup large tools for build space
+        uses: ./.github/actions/cleanup-runner
+      - name: Install RocksDB
+        uses: ./.github/actions/install-rocksdb
       - name: Rustup
         run: rustup update --no-self-update
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/next' }}
       - name: Build docs
-        run: make doc
+        run: cargo doc --no-deps --workspace --all-features --locked
 
   unused_deps:
     name: check for unused dependencies
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@main
       - name: machete
@@ -101,7 +113,7 @@ jobs:
 
   proto:
     name: proto check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@main
       - name: Rustup

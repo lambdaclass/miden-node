@@ -1,0 +1,35 @@
+// Specification of the user facing gRPC API.
+syntax = "proto3";
+package validator;
+
+import "types/transaction.proto";
+import "types/blockchain.proto";
+import "types/primitives.proto";
+import "google/protobuf/empty.proto";
+
+// VALIDATOR API
+// ================================================================================================
+
+// Validator API for the Validator component.
+service Api {
+   // Returns the status info of the validator.
+   rpc Status(google.protobuf.Empty) returns (ValidatorStatus) {}
+
+   // Submits a transaction to the validator.
+   rpc SubmitProvenTransaction(transaction.ProvenTransaction) returns (google.protobuf.Empty) {}
+
+   // Validates a proposed block and returns the block header and body.
+   rpc SignBlock(blockchain.ProposedBlock) returns (blockchain.BlockSignature) {}
+}
+
+// VALIDATOR STATUS
+// ================================================================================================
+
+// Represents the status of the validator.
+message ValidatorStatus {
+    // The validator's running version.
+    string version = 1;
+
+    // The validator's status.
+    string status = 2;
+}

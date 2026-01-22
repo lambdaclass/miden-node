@@ -3,7 +3,7 @@
     reason = "We will not approach the item count where i64 and usize cause issues"
 )]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeInclusive;
 
 use diesel::prelude::{
@@ -25,21 +25,20 @@ use diesel::{
     SelectableHelper,
     SqliteConnection,
 };
-use miden_lib::utils::{Deserializable, Serializable};
 use miden_node_utils::limiter::{
     QueryParamAccountIdLimit,
     QueryParamLimiter,
     QueryParamNoteCommitmentLimit,
     QueryParamNoteTagLimit,
 };
-use miden_objects::account::AccountId;
-use miden_objects::block::{BlockNoteIndex, BlockNumber};
-use miden_objects::crypto::merkle::SparseMerklePath;
-use miden_objects::note::{
+use miden_protocol::Word;
+use miden_protocol::account::AccountId;
+use miden_protocol::block::{BlockNoteIndex, BlockNumber};
+use miden_protocol::crypto::merkle::SparseMerklePath;
+use miden_protocol::note::{
     NoteAssets,
+    NoteAttachment,
     NoteDetails,
-    NoteExecutionHint,
-    NoteExecutionMode,
     NoteId,
     NoteInclusionProof,
     NoteInputs,
@@ -50,13 +49,12 @@ use miden_objects::note::{
     NoteType,
     Nullifier,
 };
-use miden_objects::{Felt, Word};
+use miden_protocol::utils::{Deserializable, Serializable};
+use miden_standards::note::NetworkAccountTarget;
 
 use crate::COMPONENT;
 use crate::db::models::conv::{
     SqlTypeConvert,
-    aux_to_raw_sql,
-    execution_hint_to_raw_sql,
     idx_to_raw_sql,
     note_type_to_raw_sql,
     raw_sql_to_idx,
@@ -65,6 +63,25 @@ use crate::db::models::queries::select_block_header_by_block_num;
 use crate::db::models::{serialize_vec, vec_raw_try_into};
 use crate::db::{DatabaseError, NoteRecord, NoteSyncRecord, NoteSyncUpdate, Page, schema};
 use crate::errors::NoteSyncError;
+
+// NETWORK NOTE TYPE
+// ================================================================================================
+
+/// Classifies network notes for database storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub(crate) enum NetworkNoteType {
+    /// Not a network note.
+    None = 0,
+    /// Single account target network note (has `NetworkAccountTarget` attachment).
+    SingleTarget = 1,
+}
+
+impl From<NetworkNoteType> for i32 {
+    fn from(value: NetworkNoteType) -> Self {
+        value as i32
+    }
+}
 
 /// Select notes matching the tags and account IDs search criteria within a block range.
 ///
@@ -97,8 +114,7 @@ use crate::errors::NoteSyncError;
 ///     note_type,
 ///     sender,
 ///     tag,
-///     aux,
-///     execution_hint,
+///     attachment,
 ///     inclusion_path
 /// FROM
 ///     notes
@@ -185,8 +201,7 @@ pub(crate) fn select_notes_since_block_by_tag_and_sender(
 ///     notes.note_type,
 ///     notes.sender,
 ///     notes.tag,
-///     notes.aux,
-///     notes.execution_hint,
+///     notes.attachment,
 ///     notes.assets,
 ///     notes.inputs,
 ///     notes.serial_num,
@@ -218,26 +233,34 @@ pub(crate) fn select_notes_by_id(
     Ok(records)
 }
 
-pub(crate) fn select_notes_by_commitment(
+/// Select the subset of note commitments that already exist in the notes table
+///
+/// # Raw SQL
+///
+/// ```sql
+/// SELECT
+///     notes.note_commitment
+/// FROM notes
+/// WHERE note_commitment IN (?1)
+/// ```
+pub(crate) fn select_existing_note_commitments(
     conn: &mut SqliteConnection,
     note_commitments: &[Word],
-) -> Result<Vec<NoteRecord>, DatabaseError> {
+) -> Result<HashSet<Word>, DatabaseError> {
+    QueryParamNoteCommitmentLimit::check(note_commitments.len())?;
+
     let note_commitments = serialize_vec(note_commitments.iter());
-    let q = schema::notes::table
-        .left_join(
-            schema::note_scripts::table
-                .on(schema::notes::script_root.eq(schema::note_scripts::script_root.nullable())),
-        )
-        .filter(schema::notes::note_commitment.eq_any(&note_commitments));
-    let raw: Vec<_> = SelectDsl::select(
-        q,
-        (NoteRecordRawRow::as_select(), schema::note_scripts::script.nullable()),
-    )
-    .load::<(NoteRecordRawRow, Option<Vec<u8>>)>(conn)?;
-    let records = vec_raw_try_into::<NoteRecord, NoteRecordWithScriptRawJoined>(
-        raw.into_iter().map(NoteRecordWithScriptRawJoined::from),
-    )?;
-    Ok(records)
+
+    let raw_commitments = SelectDsl::select(schema::notes::table, schema::notes::note_commitment)
+        .filter(schema::notes::note_commitment.eq_any(&note_commitments))
+        .load::<Vec<u8>>(conn)?;
+
+    let commitments = raw_commitments
+        .into_iter()
+        .map(|commitment| Word::read_from_bytes(&commitment[..]))
+        .collect::<Result<HashSet<_>, _>>()?;
+
+    Ok(commitments)
 }
 
 /// Select all notes from the DB using the given [`SqliteConnection`].
@@ -258,8 +281,7 @@ pub(crate) fn select_notes_by_commitment(
 ///     notes.note_type,
 ///     notes.sender,
 ///     notes.tag,
-///     notes.aux,
-///     notes.execution_hint,
+///     notes.attachment,
 ///     notes.assets,
 ///     notes.inputs,
 ///     notes.serial_num,
@@ -379,115 +401,6 @@ pub(crate) fn select_note_script_by_root(
         .map_err(Into::into)
 }
 
-/// Returns a paginated batch of network notes that have not yet been consumed.
-///
-/// # Returns
-///
-/// A set of unconsumed network notes with maximum length of `size` and the page to get
-/// the next set.
-///
-/// Attention: uses the _implicit_ column `rowid`, which requires to use a few raw SQL nugget
-/// statements
-///
-/// # Raw SQL
-///
-/// ```sql
-/// SELECT
-///     notes.committed_at,
-///     notes.batch_index,
-///     notes.note_index,
-///     notes.note_id,
-///     notes.note_type,
-///     notes.sender,
-///     notes.tag,
-///     notes.aux,
-///     notes.execution_hint,
-///     notes.assets,
-///     notes.inputs,
-///     notes.serial_num,
-///     notes.inclusion_path,
-///     note_scripts.script,
-///     notes.rowid
-/// FROM notes
-/// LEFT JOIN note_scripts ON notes.script_root = note_scripts.script_root
-/// WHERE
-///     execution_mode = 0 AND consumed_at IS NULL AND notes.rowid >= ?1
-/// ORDER BY notes.rowid ASC
-/// LIMIT ?2
-/// ```
-#[allow(
-    clippy::cast_sign_loss,
-    reason = "We need custom SQL statements which has given types that we need to convert"
-)]
-pub(crate) fn unconsumed_network_notes(
-    conn: &mut SqliteConnection,
-    mut page: Page,
-) -> Result<(Vec<NoteRecord>, Page), DatabaseError> {
-    assert_eq!(
-        NoteExecutionMode::Network as u8,
-        0,
-        "Hardcoded execution value must match query"
-    );
-
-    let rowid_sel = diesel::dsl::sql::<diesel::sql_types::BigInt>("notes.rowid");
-    let rowid_sel_ge =
-        diesel::dsl::sql::<diesel::sql_types::Bool>("notes.rowid >= ")
-            .bind::<diesel::sql_types::BigInt, i64>(page.token.unwrap_or_default() as i64);
-
-    #[allow(
-        clippy::items_after_statements,
-        reason = "It's only relevant for a single call function"
-    )]
-    type RawLoadedTuple = (
-        NoteRecordRawRow,
-        Option<Vec<u8>>, // script
-        i64,             // rowid (from sql::<BigInt>("notes.rowid"))
-    );
-
-    #[allow(
-        clippy::items_after_statements,
-        reason = "It's only relevant for a single call function"
-    )]
-    fn split_into_raw_note_record_and_implicit_row_id(
-        tuple: RawLoadedTuple,
-    ) -> (NoteRecordWithScriptRawJoined, i64) {
-        let (note, script, row) = tuple;
-        let combined = NoteRecordWithScriptRawJoined::from((note, script));
-        (combined, row)
-    }
-
-    let raw = SelectDsl::select(
-        schema::notes::table.left_join(
-            schema::note_scripts::table
-                .on(schema::notes::script_root.eq(schema::note_scripts::script_root.nullable())),
-        ),
-        (
-            NoteRecordRawRow::as_select(),
-            schema::note_scripts::script.nullable(),
-            rowid_sel.clone(),
-        ),
-    )
-    .filter(schema::notes::execution_mode.eq(NoteExecutionMode::Network.to_raw_sql()))
-    .filter(schema::notes::consumed_at.is_null())
-    .filter(rowid_sel_ge)
-    .order(rowid_sel.asc())
-    .limit(page.size.get() as i64 + 1)
-    .load::<RawLoadedTuple>(conn)?;
-
-    let mut notes = Vec::with_capacity(page.size.into());
-    for raw_item in raw {
-        let (raw_item, row_id) = split_into_raw_note_record_and_implicit_row_id(raw_item);
-        page.token = None;
-        if notes.len() == page.size.get() {
-            page.token = Some(row_id as u64);
-            break;
-        }
-        notes.push(TryInto::<NoteRecord>::try_into(raw_item)?);
-    }
-
-    Ok((notes, page))
-}
-
 /// Returns a paginated batch of network notes for an account that are unconsumed by a specified
 /// block number.
 ///
@@ -512,8 +425,7 @@ pub(crate) fn unconsumed_network_notes(
 ///     notes.note_type,
 ///     notes.sender,
 ///     notes.tag,
-///     notes.aux,
-///     notes.execution_hint,
+///     notes.attachment,
 ///     notes.assets,
 ///     notes.inputs,
 ///     notes.serial_num,
@@ -523,7 +435,7 @@ pub(crate) fn unconsumed_network_notes(
 /// FROM notes
 /// LEFT JOIN note_scripts ON notes.script_root = note_scripts.script_root
 /// WHERE
-///     execution_mode = 0 AND tag = ?1 AND
+///     network_note_type = 1 AND target_account_id = ?1 AND
 ///     committed_at <= ?2 AND
 ///     (consumed_at IS NULL OR consumed_at > ?2) AND notes.rowid >= ?3
 /// ORDER BY notes.rowid ASC
@@ -537,18 +449,12 @@ pub(crate) fn unconsumed_network_notes(
     clippy::too_many_lines,
     reason = "Lines will be reduced when schema is updated to simplify logic"
 )]
-pub(crate) fn select_unconsumed_network_notes_by_tag(
+pub(crate) fn select_unconsumed_network_notes_by_account_id(
     conn: &mut SqliteConnection,
-    tag: u32,
+    account_id: AccountId,
     block_num: BlockNumber,
     mut page: Page,
 ) -> Result<(Vec<NoteRecord>, Page), DatabaseError> {
-    assert_eq!(
-        NoteExecutionMode::Network as u8,
-        0,
-        "Hardcoded execution value must match query"
-    );
-
     let rowid_sel = diesel::dsl::sql::<diesel::sql_types::BigInt>("notes.rowid");
     let rowid_sel_ge =
         diesel::dsl::sql::<diesel::sql_types::Bool>("notes.rowid >= ")
@@ -587,8 +493,8 @@ pub(crate) fn select_unconsumed_network_notes_by_tag(
             rowid_sel.clone(),
         ),
     )
-    .filter(schema::notes::execution_mode.eq(NoteExecutionMode::Network.to_raw_sql()))
-    .filter(schema::notes::tag.eq(tag as i32))
+    .filter(schema::notes::network_note_type.eq(i32::from(NetworkNoteType::SingleTarget)))
+    .filter(schema::notes::target_account_id.eq(Some(account_id.to_bytes())))
     .filter(schema::notes::committed_at.le(block_num.to_raw_sql()))
     .filter(
         schema::notes::consumed_at
@@ -691,8 +597,7 @@ pub struct NoteRecordWithScriptRawJoined {
     pub note_type: i32,
     pub sender: Vec<u8>, // AccountId
     pub tag: i32,
-    pub aux: i64,
-    pub execution_hint: i64,
+    pub attachment: Vec<u8>,
     // #[diesel(embed)]
     // pub metadata: NoteMetadataRaw,
     pub assets: Option<Vec<u8>>,
@@ -716,8 +621,7 @@ impl From<(NoteRecordRawRow, Option<Vec<u8>>)> for NoteRecordWithScriptRawJoined
             note_type,
             sender,
             tag,
-            aux,
-            execution_hint,
+            attachment,
             assets,
             inputs,
             serial_num,
@@ -732,8 +636,7 @@ impl From<(NoteRecordRawRow, Option<Vec<u8>>)> for NoteRecordWithScriptRawJoined
             note_type,
             sender,
             tag,
-            aux,
-            execution_hint,
+            attachment,
             assets,
             inputs,
             serial_num,
@@ -760,8 +663,7 @@ impl TryInto<NoteRecord> for NoteRecordWithScriptRawJoined {
             note_type,
             sender,
             tag,
-            execution_hint,
-            aux,
+            attachment,
             // metadata ^^^,
             assets,
             inputs,
@@ -772,13 +674,7 @@ impl TryInto<NoteRecord> for NoteRecordWithScriptRawJoined {
             ..
         } = raw;
         let index = BlockNoteIndexRawRow { batch_index, note_index };
-        let metadata = NoteMetadataRawRow {
-            note_type,
-            sender,
-            tag,
-            aux,
-            execution_hint,
-        };
+        let metadata = NoteMetadataRawRow { note_type, sender, tag, attachment };
         let details = NoteDetailsRawRow { assets, inputs, serial_num };
 
         let metadata = metadata.try_into()?;
@@ -831,8 +727,7 @@ pub struct NoteRecordRawRow {
     pub note_type: i32,
     pub sender: Vec<u8>, // AccountId
     pub tag: i32,
-    pub aux: i64,
-    pub execution_hint: i64,
+    pub attachment: Vec<u8>,
 
     pub assets: Option<Vec<u8>>,
     pub inputs: Option<Vec<u8>>,
@@ -848,8 +743,7 @@ pub struct NoteMetadataRawRow {
     note_type: i32,
     sender: Vec<u8>, // AccountId
     tag: i32,
-    aux: i64,
-    execution_hint: i64,
+    attachment: Vec<u8>,
 }
 
 #[allow(clippy::cast_sign_loss)]
@@ -859,11 +753,9 @@ impl TryInto<NoteMetadata> for NoteMetadataRawRow {
         let sender = AccountId::read_from_bytes(&self.sender[..])?;
         let note_type = NoteType::try_from(self.note_type as u32)
             .map_err(DatabaseError::conversiont_from_sql::<NoteType, _, _>)?;
-        let tag = NoteTag::from(self.tag as u32);
-        let execution_hint = NoteExecutionHint::try_from(self.execution_hint as u64)
-            .map_err(DatabaseError::conversiont_from_sql::<NoteExecutionHint, _, _>)?;
-        let aux = Felt::new(self.aux as u64);
-        Ok(NoteMetadata::new(sender, note_type, tag, execution_hint, aux)?)
+        let tag = NoteTag::new(self.tag as u32);
+        let attachment = NoteAttachment::read_from_bytes(&self.attachment)?;
+        Ok(NoteMetadata::new(sender, note_type, tag).with_attachment(attachment))
     }
 }
 
@@ -913,7 +805,7 @@ pub(crate) fn insert_notes(
         .values(Vec::from_iter(
             notes
                 .iter()
-                .map(|(note, nullifier)| NoteInsertRowInsert::from((note.clone(), *nullifier))),
+                .map(|(note, nullifier)| NoteInsertRow::from((note.clone(), *nullifier))),
         ))
         .execute(conn)?;
     Ok(count)
@@ -956,7 +848,7 @@ pub(crate) fn insert_scripts<'a>(
 
 #[derive(Debug, Clone, PartialEq, Insertable)]
 #[diesel(table_name = schema::notes)]
-pub struct NoteInsertRowInsert {
+pub struct NoteInsertRow {
     pub committed_at: i64,
 
     pub batch_index: i32,
@@ -968,21 +860,32 @@ pub struct NoteInsertRowInsert {
     pub note_type: i32,
     pub sender: Vec<u8>, // AccountId
     pub tag: i32,
-    pub aux: i64,
-    pub execution_hint: i64,
 
+    pub network_note_type: i32,
+    pub target_account_id: Option<Vec<u8>>,
+    pub attachment: Vec<u8>,
+    pub inclusion_path: Vec<u8>,
     pub consumed_at: Option<i64>,
+    pub nullifier: Option<Vec<u8>>,
     pub assets: Option<Vec<u8>>,
     pub inputs: Option<Vec<u8>>,
-    pub serial_num: Option<Vec<u8>>,
-    pub nullifier: Option<Vec<u8>>,
     pub script_root: Option<Vec<u8>>,
-    pub execution_mode: i32,
-    pub inclusion_path: Vec<u8>,
+    pub serial_num: Option<Vec<u8>>,
 }
 
-impl From<(NoteRecord, Option<Nullifier>)> for NoteInsertRowInsert {
+impl From<(NoteRecord, Option<Nullifier>)> for NoteInsertRow {
     fn from((note, nullifier): (NoteRecord, Option<Nullifier>)) -> Self {
+        let attachment = note.metadata.attachment();
+
+        let target_account_id = NetworkAccountTarget::try_from(attachment).ok();
+        let network_note_type = if target_account_id.is_some() {
+            NetworkNoteType::SingleTarget
+        } else {
+            NetworkNoteType::None
+        };
+
+        let attachment_bytes = attachment.to_bytes();
+
         Self {
             committed_at: note.block_num.to_raw_sql(),
             batch_index: idx_to_raw_sql(note.note_index.batch_idx()),
@@ -992,12 +895,12 @@ impl From<(NoteRecord, Option<Nullifier>)> for NoteInsertRowInsert {
             note_type: note_type_to_raw_sql(note.metadata.note_type() as u8),
             sender: note.metadata.sender().to_bytes(),
             tag: note.metadata.tag().to_raw_sql(),
-            execution_mode: note.metadata.tag().execution_mode().to_raw_sql(),
-            aux: aux_to_raw_sql(note.metadata.aux()),
-            execution_hint: execution_hint_to_raw_sql(note.metadata.execution_hint().into()),
+            network_note_type: network_note_type.into(),
+            target_account_id: target_account_id.map(|t| t.target_id().to_bytes()),
+            attachment: attachment_bytes,
             inclusion_path: note.inclusion_path.to_bytes(),
             consumed_at: None::<i64>, // New notes are always unconsumed.
-            nullifier: nullifier.as_ref().map(Nullifier::to_bytes), /* Beware: `Option<T>` also implements `to_bytes`, but this is not what you want. */
+            nullifier: nullifier.as_ref().map(Nullifier::to_bytes),
             assets: note.details.as_ref().map(|d| d.assets().to_bytes()),
             inputs: note.details.as_ref().map(|d| d.inputs().to_bytes()),
             script_root: note.details.as_ref().map(|d| d.script().root().to_bytes()),

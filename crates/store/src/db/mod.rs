@@ -1,20 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use diesel::prelude::QueryableByName;
-use diesel::{Connection, RunQueryDsl, SqliteConnection};
-use miden_lib::utils::{Deserializable, Serializable};
-use miden_node_proto::domain::account::{AccountInfo, AccountSummary, NetworkAccountPrefix};
+use diesel::{Connection, QueryableByName, RunQueryDsl, SqliteConnection};
+use miden_node_proto::domain::account::{AccountInfo, AccountSummary};
 use miden_node_proto::generated as proto;
 use miden_node_utils::tracing::OpenTelemetrySpanExt;
-use miden_objects::Word;
-use miden_objects::account::AccountId;
-use miden_objects::asset::{Asset, AssetVaultKey};
-use miden_objects::block::{BlockHeader, BlockNoteIndex, BlockNumber, ProvenBlock};
-use miden_objects::crypto::merkle::SparseMerklePath;
-use miden_objects::note::{
+use miden_protocol::Word;
+use miden_protocol::account::{AccountHeader, AccountId, AccountStorageHeader};
+use miden_protocol::asset::{Asset, AssetVaultKey};
+use miden_protocol::block::{BlockHeader, BlockNoteIndex, BlockNumber, ProvenBlock};
+use miden_protocol::crypto::merkle::SparseMerklePath;
+use miden_protocol::note::{
     NoteDetails,
     NoteId,
     NoteInclusionProof,
@@ -22,7 +20,8 @@ use miden_objects::note::{
     NoteScript,
     Nullifier,
 };
-use miden_objects::transaction::TransactionId;
+use miden_protocol::transaction::TransactionId;
+use miden_protocol::utils::{Deserializable, Serializable};
 use tokio::sync::oneshot;
 use tracing::{Instrument, info, instrument};
 
@@ -38,6 +37,7 @@ use crate::genesis::GenesisBlock;
 pub(crate) mod manager;
 
 mod migrations;
+mod schema_hash;
 
 #[cfg(test)]
 mod tests;
@@ -102,8 +102,8 @@ pub struct TransactionRecord {
     pub account_id: AccountId,
     pub initial_state_commitment: Word,
     pub final_state_commitment: Word,
-    pub input_notes: Vec<Nullifier>, // Store nullifiers for input notes
-    pub output_notes: Vec<NoteId>,   // Store note IDs for output notes
+    pub nullifiers: Vec<Nullifier>, // Store nullifiers for input notes
+    pub output_notes: Vec<NoteId>,  // Store note IDs for output notes
 }
 
 impl TransactionRecord {
@@ -113,16 +113,15 @@ impl TransactionRecord {
     pub fn into_proto_with_note_records(
         self,
         note_records: Vec<NoteRecord>,
-    ) -> proto::rpc_store::TransactionRecord {
-        let output_notes: Vec<proto::note::NoteSyncRecord> =
-            note_records.into_iter().map(Into::into).collect();
+    ) -> proto::rpc::TransactionRecord {
+        let output_notes = Vec::from_iter(note_records.into_iter().map(Into::into));
 
-        proto::rpc_store::TransactionRecord {
-            transaction_header: Some(proto::transaction::TransactionHeader {
+        proto::rpc::TransactionRecord {
+            header: Some(proto::transaction::TransactionHeader {
                 account_id: Some(self.account_id.into()),
                 initial_state_commitment: Some(self.initial_state_commitment.into()),
                 final_state_commitment: Some(self.final_state_commitment.into()),
-                input_notes: self.input_notes.into_iter().map(From::from).collect(),
+                nullifiers: self.nullifiers.into_iter().map(From::from).collect(),
                 output_notes,
             }),
             block_num: self.block_num.as_u32(),
@@ -252,8 +251,8 @@ impl Db {
                 genesis.header(),
                 &[],
                 &[],
-                genesis.updated_accounts(),
-                genesis.transactions(),
+                genesis.body().updated_accounts(),
+                genesis.body().transactions(),
             )
         })
         .context("failed to insert genesis block")?;
@@ -327,7 +326,7 @@ impl Db {
 
     /// Loads all the nullifiers from the DB.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
-    pub async fn select_all_nullifiers(&self) -> Result<Vec<NullifierInfo>> {
+    pub(crate) async fn select_all_nullifiers(&self) -> Result<Vec<NullifierInfo>> {
         self.transact("all nullifiers", move |conn| {
             let nullifiers = queries::select_all_nullifiers(conn)?;
             Ok(nullifiers)
@@ -396,11 +395,20 @@ impl Db {
         .await
     }
 
-    /// Loads all the account commitments from the DB.
+    /// TODO marked for removal, replace with paged version
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
     pub async fn select_all_account_commitments(&self) -> Result<Vec<(AccountId, Word)>> {
         self.transact("read all account commitments", move |conn| {
             queries::select_all_account_commitments(conn)
+        })
+        .await
+    }
+
+    /// Returns all account IDs that have public state.
+    #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
+    pub async fn select_all_public_account_ids(&self) -> Result<Vec<AccountId>> {
+        self.transact("read all public account IDs", move |conn| {
+            queries::select_all_public_account_ids(conn)
         })
         .await
     }
@@ -420,6 +428,71 @@ impl Db {
     ) -> Result<Option<AccountInfo>> {
         self.transact("Get account by id prefix", move |conn| {
             queries::select_account_by_id_prefix(conn, id_prefix)
+        })
+        .await
+    }
+
+    /// Returns network account IDs within the specified block range (based on account creation
+    /// block).
+    ///
+    /// The function may return fewer accounts than exist in the range if the result would exceed
+    /// `MAX_RESPONSE_PAYLOAD_BYTES / AccountId::SERIALIZED_SIZE` rows. In this case, the result is
+    /// truncated at a block boundary to ensure all accounts from included blocks are returned.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// - A vector of network account IDs.
+    /// - The last block number that was fully included in the result. When truncated, this will be
+    ///   less than the requested range end.
+    #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
+    pub async fn select_all_network_account_ids(
+        &self,
+        block_range: RangeInclusive<BlockNumber>,
+    ) -> Result<(Vec<AccountId>, BlockNumber)> {
+        self.transact("Get all network account IDs", move |conn| {
+            queries::select_all_network_account_ids(conn, block_range)
+        })
+        .await
+    }
+
+    /// Queries vault assets at a specific block
+    #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
+    pub async fn select_account_vault_at_block(
+        &self,
+        account_id: AccountId,
+        block_num: BlockNumber,
+    ) -> Result<Vec<Asset>> {
+        self.transact("Get account vault at block", move |conn| {
+            queries::select_account_vault_at_block(conn, account_id, block_num)
+        })
+        .await
+    }
+
+    /// Queries the account code by its commitment hash.
+    ///
+    /// Returns `None` if no code exists with that commitment.
+    pub async fn select_account_code_by_commitment(
+        &self,
+        code_commitment: Word,
+    ) -> Result<Option<Vec<u8>>> {
+        self.transact("Get account code by commitment", move |conn| {
+            queries::select_account_code_by_commitment(conn, code_commitment)
+        })
+        .await
+    }
+
+    /// Queries the account header and storage header for a specific account at a block.
+    ///
+    /// Returns both in a single query to avoid querying the database twice.
+    /// Returns `None` if the account doesn't exist at that block.
+    pub async fn select_account_header_with_storage_header_at_block(
+        &self,
+        account_id: AccountId,
+        block_num: BlockNumber,
+    ) -> Result<Option<(AccountHeader, AccountStorageHeader)>> {
+        self.transact("Get account header with storage header at block", move |conn| {
+            queries::select_account_header_with_storage_header_at_block(conn, account_id, block_num)
         })
         .await
     }
@@ -449,7 +522,7 @@ impl Db {
         .await
     }
 
-    /// Loads all the [`miden_objects::note::Note`]s matching a certain [`NoteId`] from the
+    /// Loads all the [`miden_protocol::note::Note`]s matching a certain [`NoteId`] from the
     /// database.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
     pub async fn select_notes_by_id(&self, note_ids: Vec<NoteId>) -> Result<Vec<NoteRecord>> {
@@ -459,15 +532,14 @@ impl Db {
         .await
     }
 
-    /// Loads all the [`NoteRecord`]s matching a certain note commitment from the
-    /// database.
+    /// Returns all note commitments from the DB that match the provided ones.
     #[instrument(level = "debug", target = COMPONENT, skip_all, ret(level = "debug"), err)]
-    pub async fn select_notes_by_commitment(
+    pub async fn select_existing_note_commitments(
         &self,
         note_commitments: Vec<Word>,
-    ) -> Result<Vec<NoteRecord>> {
+    ) -> Result<HashSet<Word>> {
         self.transact("note by commitment", move |conn| {
-            queries::select_notes_by_commitment(conn, note_commitments.as_slice())
+            queries::select_existing_note_commitments(conn, note_commitments.as_slice())
         })
         .await
     }
@@ -502,9 +574,9 @@ impl Db {
                 conn,
                 block.header(),
                 &notes,
-                block.created_nullifiers(),
-                block.updated_accounts(),
-                block.transactions(),
+                block.body().created_nullifiers(),
+                block.body().updated_accounts(),
+                block.body().transactions(),
             )?;
 
             // XXX FIXME TODO free floating mutex MUST NOT exist
@@ -533,18 +605,6 @@ impl Db {
             models::queries::select_account_storage_map_values(conn, account_id, block_range)
         })
         .await
-    }
-
-    /// Runs database optimization.
-    #[instrument(level = "debug", target = COMPONENT, skip_all, err)]
-    pub async fn optimize(&self) -> Result<(), DatabaseError> {
-        self.transact("db optimization", |conn| {
-            diesel::sql_query("PRAGMA optimize")
-                .execute(conn)
-                .map_err(DatabaseError::Diesel)
-        })
-        .await?;
-        Ok(())
     }
 
     /// Emits size metrics for each table in the database, and the entire database.
@@ -588,35 +648,17 @@ impl Db {
         Ok(())
     }
 
-    /// Loads the network notes that have not been consumed yet, using pagination to limit the
-    /// number of notes returned.
-    pub(crate) async fn select_unconsumed_network_notes(
-        &self,
-        page: Page,
-    ) -> Result<(Vec<NoteRecord>, Page)> {
-        self.transact("unconsumed network notes", move |conn| {
-            models::queries::unconsumed_network_notes(conn, page)
-        })
-        .await
-    }
-
     /// Loads the network notes for an account that are unconsumed by a specified block number.
     /// Pagination is used to limit the number of notes returned.
-    pub(crate) async fn select_unconsumed_network_notes_for_account(
+    pub(crate) async fn select_unconsumed_network_notes(
         &self,
-        network_account_id_prefix: NetworkAccountPrefix,
+        account_id: AccountId,
         block_num: BlockNumber,
         page: Page,
     ) -> Result<(Vec<NoteRecord>, Page)> {
-        // Network notes sent to a specific account have their tags set to the prefix of the target
-        // account ID. So we can convert the ID prefix into a note tag to query the notes for a
-        // given account.
         self.transact("unconsumed network notes for account", move |conn| {
-            models::queries::select_unconsumed_network_notes_by_tag(
-                conn,
-                network_account_id_prefix.into(),
-                block_num,
-                page,
+            models::queries::select_unconsumed_network_notes_by_account_id(
+                conn, account_id, block_num, page,
             )
         })
         .await

@@ -1,17 +1,16 @@
 use std::convert::Infallible;
 
-use miden_node_proto::generated::block_producer_store::block_producer_server;
+use miden_node_proto::generated::store::block_producer_server;
 use miden_node_proto::generated::{self as proto};
 use miden_node_proto::try_convert;
 use miden_node_utils::ErrorReport;
 use miden_node_utils::tracing::OpenTelemetrySpanExt;
-use miden_objects::Word;
-use miden_objects::block::{BlockNumber, ProvenBlock};
-use miden_objects::utils::Deserializable;
+use miden_protocol::Word;
+use miden_protocol::block::{BlockNumber, ProvenBlock};
+use miden_protocol::utils::Deserializable;
 use tonic::{Request, Response, Status};
-use tracing::{Instrument, instrument};
+use tracing::Instrument;
 
-use crate::COMPONENT;
 use crate::errors::ApplyBlockError;
 use crate::server::api::{
     StoreApi,
@@ -31,28 +30,14 @@ impl block_producer_server::BlockProducer for StoreApi {
     /// Returns block header for the specified block number.
     ///
     /// If the block number is not provided, block header for the latest block is returned.
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "store.block_producer_server.get_block_header_by_number",
-        skip_all,
-        err
-    )]
     async fn get_block_header_by_number(
         &self,
-        request: Request<proto::shared::BlockHeaderByNumberRequest>,
-    ) -> Result<Response<proto::shared::BlockHeaderByNumberResponse>, Status> {
+        request: Request<proto::rpc::BlockHeaderByNumberRequest>,
+    ) -> Result<Response<proto::rpc::BlockHeaderByNumberResponse>, Status> {
         self.get_block_header_by_number_inner(request).await
     }
 
     /// Updates the local DB by inserting a new block header and the related data.
-    #[instrument(
-        parent = None,
-        target = COMPONENT,
-        name = "store.block_producer_server.apply_block",
-        skip_all,
-        err
-    )]
     async fn apply_block(
         &self,
         request: Request<proto::blockchain::Block>,
@@ -65,10 +50,10 @@ impl block_producer_server::BlockProducer for StoreApi {
 
         let span = tracing::Span::current();
         span.set_attribute("block.number", block.header().block_num());
-        span.set_attribute("block.commitment", block.commitment());
-        span.set_attribute("block.accounts.count", block.updated_accounts().len());
-        span.set_attribute("block.output_notes.count", block.output_notes().count());
-        span.set_attribute("block.nullifiers.count", block.created_nullifiers().len());
+        span.set_attribute("block.commitment", block.header().commitment());
+        span.set_attribute("block.accounts.count", block.body().updated_accounts().len());
+        span.set_attribute("block.output_notes.count", block.body().output_notes().count());
+        span.set_attribute("block.nullifiers.count", block.body().created_nullifiers().len());
 
         // We perform the apply_block work in a separate task. This prevents the caller cancelling
         // the request and thereby cancelling the task at an arbitrary point of execution.
@@ -106,17 +91,10 @@ impl block_producer_server::BlockProducer for StoreApi {
     }
 
     /// Returns data needed by the block producer to construct and prove the next block.
-    #[instrument(
-            parent = None,
-            target = COMPONENT,
-            name = "store.block_producer_server.get_block_inputs",
-            skip_all,
-            err
-        )]
     async fn get_block_inputs(
         &self,
-        request: Request<proto::block_producer_store::BlockInputsRequest>,
-    ) -> Result<Response<proto::block_producer_store::BlockInputs>, Status> {
+        request: Request<proto::store::BlockInputsRequest>,
+    ) -> Result<Response<proto::store::BlockInputs>, Status> {
         let request = request.into_inner();
 
         let account_ids = read_account_ids::<Status>(&request.account_ids)?;
@@ -136,7 +114,7 @@ impl block_producer_server::BlockProducer for StoreApi {
                 reference_blocks,
             )
             .await
-            .map(proto::block_producer_store::BlockInputs::from)
+            .map(proto::store::BlockInputs::from)
             .map(Response::new)
             .inspect_err(|err| tracing::Span::current().set_error(err))
             .map_err(|err| tonic::Status::internal(err.as_report()))
@@ -145,17 +123,10 @@ impl block_producer_server::BlockProducer for StoreApi {
     /// Fetches the inputs for a transaction batch from the database.
     ///
     /// See [`State::get_batch_inputs`] for details.
-    #[instrument(
-          parent = None,
-          target = COMPONENT,
-          name = "store.block_producer_server.get_batch_inputs",
-          skip_all,
-          err
-        )]
     async fn get_batch_inputs(
         &self,
-        request: Request<proto::block_producer_store::BatchInputsRequest>,
-    ) -> Result<Response<proto::block_producer_store::BatchInputs>, Status> {
+        request: Request<proto::store::BatchInputsRequest>,
+    ) -> Result<Response<proto::store::BatchInputs>, Status> {
         let request = request.into_inner();
 
         let note_commitments: Vec<Word> = try_convert(request.note_commitments)
@@ -177,17 +148,10 @@ impl block_producer_server::BlockProducer for StoreApi {
             .map_err(|err| tonic::Status::internal(err.as_report()))
     }
 
-    #[instrument(
-            parent = None,
-            target = COMPONENT,
-            name = "store.block_producer_server.get_transaction_inputs",
-            skip_all,
-            err
-        )]
     async fn get_transaction_inputs(
         &self,
-        request: Request<proto::block_producer_store::TransactionInputsRequest>,
-    ) -> Result<Response<proto::block_producer_store::TransactionInputs>, Status> {
+        request: Request<proto::store::TransactionInputsRequest>,
+    ) -> Result<Response<proto::store::TransactionInputs>, Status> {
         let request = request.into_inner();
 
         let account_id = read_account_id::<Status>(request.account_id)?;
@@ -205,17 +169,19 @@ impl block_producer_server::BlockProducer for StoreApi {
 
         let block_height = self.state.latest_block_num().await.as_u32();
 
-        Ok(Response::new(proto::block_producer_store::TransactionInputs {
-            account_state: Some(proto::block_producer_store::transaction_inputs::AccountTransactionInputRecord {
+        Ok(Response::new(proto::store::TransactionInputs {
+            account_state: Some(proto::store::transaction_inputs::AccountTransactionInputRecord {
                 account_id: Some(account_id.into()),
                 account_commitment: Some(tx_inputs.account_commitment.into()),
             }),
             nullifiers: tx_inputs
                 .nullifiers
                 .into_iter()
-                .map(|nullifier| proto::block_producer_store::transaction_inputs::NullifierTransactionInputRecord {
-                    nullifier: Some(nullifier.nullifier.into()),
-                    block_num: nullifier.block_num.as_u32(),
+                .map(|nullifier| {
+                    proto::store::transaction_inputs::NullifierTransactionInputRecord {
+                        nullifier: Some(nullifier.nullifier.into()),
+                        block_num: nullifier.block_num.as_u32(),
+                    }
                 })
                 .collect(),
             found_unauthenticated_notes: tx_inputs

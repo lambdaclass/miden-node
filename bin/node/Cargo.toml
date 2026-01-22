@@ -21,6 +21,7 @@ tracing-forest = ["miden-node-block-producer/tracing-forest"]
 anyhow                    = { workspace = true }
 clap                      = { features = ["env", "string"], workspace = true }
 fs-err                    = { workspace = true }
+hex                       = { workspace = true }
 humantime                 = { workspace = true }
 miden-node-block-producer = { workspace = true }
 miden-node-ntx-builder    = { workspace = true }
@@ -28,14 +29,10 @@ miden-node-rpc            = { workspace = true }
 miden-node-store          = { workspace = true }
 miden-node-utils          = { workspace = true }
 miden-node-validator      = { workspace = true }
-miden-objects             = { workspace = true }
+miden-protocol            = { workspace = true }
 tokio                     = { features = ["macros", "net", "rt-multi-thread"], workspace = true }
 url                       = { workspace = true }
 
 [dev-dependencies]
 figment          = { features = ["env", "test", "toml"], version = "0.10" }
 miden-node-utils = { features = ["tracing-forest"], workspace = true }
-
-[build-dependencies]
-# Required to inject build metadata.
-miden-node-utils = { features = ["vergen"], workspace = true }

@@ -8,6 +8,7 @@ help:
 
 WARNINGS=RUSTDOCFLAGS="-D warnings"
 BUILD_PROTO=BUILD_PROTO=1
+CONTAINER_RUNTIME ?= docker
 
 # -- linting --------------------------------------------------------------------------------------
 
@@ -15,6 +16,7 @@ BUILD_PROTO=BUILD_PROTO=1
 clippy: ## Runs Clippy with configs
 	cargo clippy --locked --all-targets --all-features --workspace -- -D warnings
 	cargo clippy --locked --all-targets --all-features -p miden-remote-prover -- -D warnings
+	cargo clippy --locked -p miden-remote-prover-client --target wasm32-unknown-unknown --no-default-features --features batch-prover,block-prover,tx-prover -- -D warnings
 
 
 .PHONY: fix
@@ -90,7 +92,7 @@ check: ## Check all targets and features for errors without code generation
 .PHONY: build
 build: ## Builds all crates and re-builds protobuf bindings for proto crates
 	${BUILD_PROTO} cargo build --locked --workspace
-	${BUILD_PROTO} cargo build --locked -p miden-remote-prover-client --target wasm32-unknown-unknown --no-default-features  # no-std compatible build
+	${BUILD_PROTO} cargo build --locked -p miden-remote-prover-client --target wasm32-unknown-unknown --no-default-features --features batch-prover,block-prover,tx-prover # no-std compatible build
 
 # --- installing ----------------------------------------------------------------------------------
 
@@ -113,20 +115,20 @@ install-network-monitor: ## Installs network monitor binary
 # --- docker --------------------------------------------------------------------------------------
 
 .PHONY: docker-build-node
-docker-build-node: ## Builds the Miden node using Docker
+docker-build-node: ## Builds the Miden node using Docker (override with CONTAINER_RUNTIME=podman)
 	@CREATED=$$(date) && \
 	VERSION=$$(cat bin/node/Cargo.toml | grep -m 1 '^version' | cut -d '"' -f 2) && \
 	COMMIT=$$(git rev-parse HEAD) && \
-	docker build --build-arg CREATED="$$CREATED" \
+	$(CONTAINER_RUNTIME) build --build-arg CREATED="$$CREATED" \
         		 --build-arg VERSION="$$VERSION" \
           		 --build-arg COMMIT="$$COMMIT" \
                  -f bin/node/Dockerfile \
                  -t miden-node-image .
 
 .PHONY: docker-run-node
-docker-run-node: ## Runs the Miden node as a Docker container
-	docker volume create miden-db
-	docker run --name miden-node \
+docker-run-node: ## Runs the Miden node as a Docker container (override with CONTAINER_RUNTIME=podman)
+	$(CONTAINER_RUNTIME) volume create miden-db
+	$(CONTAINER_RUNTIME) run --name miden-node \
 			   -p 57291:57291 \
                -v miden-db:/db \
                -d miden-node-image
