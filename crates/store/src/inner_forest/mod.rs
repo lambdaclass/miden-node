@@ -518,7 +518,7 @@ impl InnerForest {
             self.storage_map_roots
                 .insert((account_id, slot_name.clone(), block_num), new_root);
 
-            assert!(map_entries.is_empty(), "a non-empty delta should have entries");
+            assert!(!map_entries.is_empty(), "a non-empty delta should have entries");
             let num_entries = map_entries.len();
 
             // keep track of the state of storage map entries
