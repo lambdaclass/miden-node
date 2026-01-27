@@ -1,10 +1,11 @@
 # Changelog
 
-## v0.14.0 (TBC)
+## v0.14.0 (TBD)
 
 ### Enhancements
 
 - [BREAKING] Updated miden-base dependencies to use `next` branch; renamed `NoteInputs` to `NoteStorage`, `.inputs()` to `.storage()`, and database `inputs` column to `storage` ([#1595](https://github.com/0xMiden/miden-node/pull/1595)).
+
 ## v0.13.2 (2026-01-27)
 
 ### Fixes
